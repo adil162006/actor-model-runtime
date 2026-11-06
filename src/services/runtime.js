@@ -2,13 +2,40 @@ import crypto from 'node:crypto';
 import Actor from '../models/Actor.js';
 import Message from '../models/Message.js';
 import RuntimeEvent from '../models/RuntimeEvent.js';
+import ActorMigration from '../models/ActorMigration.js';
+import { getWorkerResourceMetrics } from './kubernetes.js';
 import { redis } from '../config/redis.js';
 
 const OWNER_KEY = 'actorlab:owners';
 const WORKER_KEY = 'actorlab:workers';
-const QUEUE_KEY = 'actorlab:worker-queue';
 const LEASE_KEY = 'actorlab:singleton:global-scheduler';
-const leaseScript = `if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('pexpire', KEYS[1], ARGV[2]) else return 0 end`;
+const acquireLeaseScript = `
+if redis.call('exists', KEYS[1]) == 1 then return 0 end
+local currentGeneration = tonumber(redis.call('get', KEYS[2]) or '0')
+local durableFloor = tonumber(ARGV[5]) or 0
+if currentGeneration < durableFloor then redis.call('set', KEYS[2], durableFloor) end
+local generation = redis.call('incr', KEYS[2])
+local owner = cjson.encode({workerId=ARGV[1], token=ARGV[2], generation=generation})
+redis.call('psetex', KEYS[1], ARGV[3], owner)
+redis.call('hdel', KEYS[3], 'renewedAt')
+redis.call('hset', KEYS[3], 'workerId', ARGV[1], 'token', ARGV[2], 'generation', generation, 'expiresAt', ARGV[4], 'acquiredAt', ARGV[4])
+return generation`;
+const renewLeaseScript = `
+local raw = redis.call('get', KEYS[1]); if not raw then return 0 end
+local owner = cjson.decode(raw)
+if owner.workerId ~= ARGV[1] or owner.token ~= ARGV[2] or tonumber(owner.generation) ~= tonumber(ARGV[3]) then return 0 end
+owner.expiresAt = ARGV[5]
+redis.call('set', KEYS[1], cjson.encode(owner), 'PX', ARGV[4])
+redis.call('hset', KEYS[2], 'expiresAt', ARGV[5], 'renewedAt', ARGV[5])
+return 1`;
+const releaseLeaseScript = `
+local raw = redis.call('get', KEYS[1]); if not raw then return 0 end
+local owner = cjson.decode(raw)
+if owner.workerId == ARGV[1] and owner.token == ARGV[2] and tonumber(owner.generation) == tonumber(ARGV[3]) then
+  redis.call('del', KEYS[1]); return 1
+end
+return 0`;
+const actorInstances = new Map();
 
 export const initialState = (type) =>
   type === 'CounterActor'
@@ -22,6 +49,28 @@ export const recordEvent = (type, message, details = {}) =>
     return null;
   });
 
+export async function resetDemoData() {
+  const [actors, messages, events, migrations] = await Promise.all([
+    Actor.deleteMany({}),
+    Message.deleteMany({}),
+    RuntimeEvent.deleteMany({}),
+    ActorMigration.deleteMany({}),
+  ]);
+  await redis.del([
+    OWNER_KEY,
+    LEASE_KEY,
+    'actorlab:singleton:generation',
+    'actorlab:singleton:status',
+  ]);
+  actorInstances.clear();
+  return {
+    actors: actors.deletedCount,
+    messages: messages.deletedCount,
+    events: events.deletedCount,
+    migrations: migrations.deletedCount,
+  };
+}
+
 export async function listWorkers() {
   const workers = await redis.hGetAll(WORKER_KEY);
   const now = Date.now();
@@ -32,9 +81,10 @@ export async function listWorkers() {
       if (
         now - new Date(worker.lastHeartbeat).getTime() <=
         Number(process.env.WORKER_TIMEOUT_MS || 15000)
-      )
-        live.push(worker);
-      else await redis.hDel(WORKER_KEY, workerId);
+      ) {
+        worker.status = worker.status || 'ACTIVE';
+        if (worker.status === 'ACTIVE') live.push(worker);
+      } else await redis.hDel(WORKER_KEY, workerId);
     } catch {
       await redis.hDel(WORKER_KEY, workerId);
     }
@@ -43,14 +93,70 @@ export async function listWorkers() {
 }
 
 export async function registerWorker(worker) {
-  const value = { ...worker, lastHeartbeat: new Date().toISOString() };
+  if (
+    !worker?.workerId ||
+    (worker.mode === 'kubernetes' && worker.workerId !== worker.podName)
+  )
+    throw Object.assign(
+      new Error('Kubernetes workerId must match its Pod name'),
+      { status: 400 },
+    );
+  const existing = await redis.hGet(WORKER_KEY, worker.workerId);
+  if (existing) {
+    const previous = JSON.parse(existing);
+    if (
+      previous.podIP &&
+      worker.podIP &&
+      previous.podIP !== worker.podIP &&
+      worker.mode === 'kubernetes'
+    )
+      throw Object.assign(
+        new Error(
+          'Worker identity is already registered by a different Pod IP',
+        ),
+        { status: 409 },
+      );
+  }
+  const value = {
+    status: 'ACTIVE',
+    ...worker,
+    lastHeartbeat: new Date().toISOString(),
+  };
   await redis.hSet(WORKER_KEY, worker.workerId, JSON.stringify(value));
   await recordEvent(
     'worker.registered',
     `Worker ${worker.workerId} registered`,
     { workerId: worker.workerId },
   );
+  setTimeout(() => {
+    rebalance().catch((error) => {
+      if (error.status !== 409)
+        console.error('Join rebalance failed:', error.message);
+    });
+  }, 0).unref?.();
   return value;
+}
+
+export async function drainWorker(workerId) {
+  const raw = await redis.hGet(WORKER_KEY, workerId);
+  if (!raw) return { ok: true, status: 'TERMINATED' };
+  const current = JSON.parse(raw);
+  await redis.hSet(
+    WORKER_KEY,
+    workerId,
+    JSON.stringify({
+      ...current,
+      status: 'DRAINING',
+      lastHeartbeat: new Date().toISOString(),
+    }),
+  );
+  setTimeout(() => {
+    rebalance().catch((error) => {
+      if (error.status !== 409)
+        console.error('Drain rebalance failed:', error.message);
+    });
+  }, 0).unref?.();
+  return { ok: true, status: 'DRAINING' };
 }
 
 export async function heartbeat(worker) {
@@ -87,8 +193,20 @@ async function chooseWorker() {
     { $group: { _id: '$workerId', count: { $sum: 1 } } },
   ]);
   const countMap = new Map(counts.map((item) => [item._id, item.count]));
+  const metrics = await getWorkerResourceMetrics();
+  const pressure = (workerId) => {
+    const metric = metrics.workers[workerId];
+    if (!metric) return 0;
+    return (
+      (metric.cpuPercentOfRequest ?? metric.cpuMillicores / 10 ?? 0) +
+      (metric.memoryPercentOfRequest ?? metric.memoryBytes / (1024 * 1024) ?? 0)
+    );
+  };
   return workers.sort(
-    (a, b) => (countMap.get(a.workerId) || 0) - (countMap.get(b.workerId) || 0),
+    (a, b) =>
+      (countMap.get(a.workerId) || 0) * 10 +
+      pressure(a.workerId) -
+      ((countMap.get(b.workerId) || 0) * 10 + pressure(b.workerId)),
   )[0];
 }
 
@@ -189,25 +307,66 @@ export async function ensureActorOwner(actor) {
 }
 
 export async function createActor({ actorId, actorType }) {
-  const worker = await chooseWorker();
   const actor = await Actor.create({
     actorId,
     actorType,
     state: initialState(actorType),
-    workerId: worker.workerId,
-    ownerGeneration: 1,
+    workerId: null,
+    ownerGeneration: 0,
   });
-  const assignment = {
-    workerId: worker.workerId,
-    generation: 1,
-    changedAt: new Date().toISOString(),
-  };
-  await redis.hSet(OWNER_KEY, actorId, JSON.stringify(assignment));
   await recordEvent('actor.created', `${actorType} ${actorId} created`, {
     actorId,
-    workerId: worker.workerId,
+    workerId: null,
   });
   return actor;
+}
+
+async function persistMessage(actorId, messageId, operation, payload) {
+  const lockKey = `actorlab:actor:${actorId}:enqueue`;
+  const token = crypto.randomUUID();
+  const deadline =
+    Date.now() + Number(process.env.WORKER_REQUEST_TIMEOUT_MS || 5000);
+  while (!(await redis.set(lockKey, token, { NX: true, PX: 10000 }))) {
+    if (Date.now() >= deadline)
+      throw Object.assign(new Error('Actor message queue is busy'), {
+        status: 503,
+      });
+    await new Promise((resolve) => setTimeout(resolve, 15));
+  }
+  try {
+    const existing = await Message.findOne({ messageId });
+    if (existing) return existing;
+    const actor = await Actor.findOneAndUpdate(
+      { actorId },
+      { $inc: { messageSequence: 1 } },
+      { new: true },
+    );
+    if (!actor)
+      throw Object.assign(new Error('Actor not found'), { status: 404 });
+    try {
+      return await Message.create({
+        messageId,
+        actorId,
+        operation,
+        payload,
+        status: 'PENDING',
+        sequence: actor.messageSequence,
+        attempts: 0,
+      });
+    } catch (error) {
+      if (error.code !== 11000) throw error;
+      const duplicate = await Message.findOne({ messageId });
+      if (duplicate) return duplicate;
+      throw error;
+    }
+  } finally {
+    await redis
+      .eval(
+        `if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end`,
+        { keys: [lockKey], arguments: [token] },
+      )
+      .catch(() => {});
+  }
 }
 
 export async function sendMessage(actorId, body) {
@@ -245,6 +404,30 @@ export async function sendMessage(actorId, body) {
     e.status = 404;
     throw e;
   }
+  const messageId = String(body.messageId || crypto.randomUUID());
+  const durableMessage = await persistMessage(
+    actorId,
+    messageId,
+    body.operation,
+    body.payload || {},
+  );
+  if (durableMessage.status === 'COMPLETED')
+    return {
+      actor: await Actor.findOne({ actorId }),
+      result: durableMessage.result,
+      messageId,
+      duplicate: true,
+    };
+  if (durableMessage.status === 'FAILED')
+    throw Object.assign(
+      new Error(durableMessage.error || 'This message previously failed'),
+      { status: 409 },
+    );
+  if (durableMessage.actorId !== actorId)
+    throw Object.assign(
+      new Error('messageId is already used by a different actor'),
+      { status: 409 },
+    );
   if (actor.status === 'migrating') {
     const deadline =
       Date.now() + Number(process.env.WORKER_REQUEST_TIMEOUT_MS || 5000);
@@ -253,20 +436,13 @@ export async function sendMessage(actorId, body) {
       actor = await Actor.findOne({ actorId });
     }
     if (actor?.status === 'migrating') {
-      const e = new Error('Actor is still migrating; retry shortly');
+      const e = new Error(
+        'Message is durably queued; actor migration is still in progress',
+      );
       e.status = 503;
       throw e;
     }
   }
-  const messageId = String(body.messageId || crypto.randomUUID());
-  const previous = await Message.findOne({ messageId });
-  if (previous)
-    return {
-      actor: await Actor.findOne({ actorId }),
-      result: previous.result,
-      messageId,
-      duplicate: true,
-    };
   const { worker, assignment, singletonGeneration } =
     await ensureActorOwner(actor);
   const timeout = AbortSignal.timeout(
@@ -281,7 +457,9 @@ export async function sendMessage(actorId, body) {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           ...body,
+          payload: durableMessage.payload,
           messageId,
+          sequence: durableMessage.sequence,
           generation: assignment.generation,
           singletonGeneration,
         }),
@@ -304,7 +482,7 @@ export async function sendMessage(actorId, body) {
   return { ...result, messageId, duplicate: Boolean(result.duplicate) };
 }
 
-export async function workerProcess(workerId, actorId, body) {
+async function workerProcessLocked(workerId, actorId, body) {
   const ownershipRaw = await redis.hGet(OWNER_KEY, actorId);
   if (!ownershipRaw) {
     const e = new Error('Actor ownership is not registered');
@@ -320,13 +498,34 @@ export async function workerProcess(workerId, actorId, body) {
     e.status = 409;
     throw e;
   }
-  const prior = await Message.findOne({ messageId: body.messageId });
-  if (prior)
+  const message = await Message.findOne({ messageId: body.messageId });
+  if (!message || message.actorId !== actorId)
+    throw Object.assign(new Error('Durable message is not available'), {
+      status: 404,
+    });
+  if (message.status === 'COMPLETED')
     return {
       actor: await Actor.findOne({ actorId }),
-      result: prior.result,
+      result: message.result,
       duplicate: true,
     };
+  const earlier = await Message.findOne({
+    actorId,
+    sequence: { $lt: message.sequence },
+    status: { $in: ['PENDING', 'PROCESSING'] },
+  }).sort({ sequence: 1 });
+  if (earlier)
+    throw Object.assign(
+      new Error('An earlier actor message is still pending'),
+      { status: 409 },
+    );
+  await Message.updateOne(
+    { _id: message._id, status: { $in: ['PENDING', 'PROCESSING'] } },
+    {
+      $set: { status: 'PROCESSING', lockedAt: new Date(), error: null },
+      $inc: { attempts: 1 },
+    },
+  );
   const actor = await Actor.findOne({
     actorId,
     workerId,
@@ -337,15 +536,58 @@ export async function workerProcess(workerId, actorId, body) {
     e.status = 409;
     throw e;
   }
+  let instance = actorInstances.get(actorId);
+  if (
+    !instance ||
+    instance.workerId !== workerId ||
+    instance.generation !== Number(body.generation)
+  ) {
+    await Actor.updateOne(
+      { _id: actor._id, ownerGeneration: Number(body.generation) },
+      { $set: { status: 'activating' } },
+    );
+    instance = {
+      actorId,
+      actorType: actor.actorType,
+      workerId,
+      generation: Number(body.generation),
+      state: structuredClone(actor.state),
+      lastActivityAt: Date.now(),
+    };
+    actorInstances.set(actorId, instance);
+    await Actor.updateOne(
+      {
+        _id: actor._id,
+        workerId,
+        ownerGeneration: Number(body.generation),
+        status: 'activating',
+      },
+      { $set: { status: 'active' } },
+    );
+  }
+  instance.state = structuredClone(actor.state);
+  actor.state = structuredClone(instance.state);
   const processed = actor.processedMessages.find(
     (entry) => entry.messageId === body.messageId,
   );
-  if (processed)
+  if (processed) {
+    await Message.updateOne(
+      { _id: message._id },
+      {
+        $set: {
+          status: 'COMPLETED',
+          result: processed.result,
+          processedAt: new Date(),
+          lockedAt: null,
+        },
+      },
+    );
     return {
       actor: await Actor.findOne({ actorId }),
       result: processed.result,
       duplicate: true,
     };
+  }
   if (actor.actorType === 'GlobalSchedulerActor') {
     const leaseRaw = await redis.get(LEASE_KEY);
     const leaseStatus = await redis.hGet(
@@ -358,13 +600,20 @@ export async function workerProcess(workerId, actorId, body) {
     } catch {}
     if (
       current?.workerId !== workerId ||
-      Number(leaseStatus) !== Number(body.singletonGeneration)
+      Number(leaseStatus) !== Number(body.singletonGeneration) ||
+      Number(current?.generation) !== Number(body.singletonGeneration)
     ) {
       const e = new Error('Singleton lease fencing check failed');
       e.status = 409;
       throw e;
     }
   }
+  const executionKey = `actorlab:actor:${actorId}:execution`;
+  if ((await redis.get(executionKey)) !== body.executionLeaseToken)
+    throw Object.assign(
+      new Error('Actor execution lease expired before commit'),
+      { status: 409 },
+    );
   const { operation, payload = {} } = body;
   let result;
   if (actor.actorType === 'CounterActor') {
@@ -431,12 +680,43 @@ export async function workerProcess(workerId, actorId, body) {
   actor.version += 1;
   actor.lastActiveAt = new Date();
   actor.status = 'active';
+  if (actor.actorType === 'GlobalSchedulerActor') {
+    const currentLease = await redis.get(LEASE_KEY);
+    let current;
+    try {
+      current = JSON.parse(currentLease);
+    } catch {}
+    if (
+      current?.workerId !== workerId ||
+      Number(current?.generation) !== Number(body.singletonGeneration)
+    ) {
+      throw Object.assign(
+        new Error('Singleton fencing token expired before commit'),
+        { status: 409 },
+      );
+    }
+  }
+  if ((await redis.get(executionKey)) !== body.executionLeaseToken)
+    throw Object.assign(
+      new Error('Actor execution lease expired before persistence'),
+      { status: 409 },
+    );
   const saved = await Actor.updateOne(
     {
       _id: actor._id,
       version: oldVersion,
       workerId,
       ownerGeneration: Number(body.generation),
+      ...(actor.actorType === 'GlobalSchedulerActor'
+        ? {
+            $or: [
+              {
+                singletonGeneration: { $lte: Number(body.singletonGeneration) },
+              },
+              { singletonGeneration: { $exists: false } },
+            ],
+          }
+        : {}),
       'processedMessages.messageId': { $ne: body.messageId },
     },
     {
@@ -445,6 +725,9 @@ export async function workerProcess(workerId, actorId, body) {
         version: actor.version,
         lastActiveAt: actor.lastActiveAt,
         status: actor.status,
+        ...(actor.actorType === 'GlobalSchedulerActor'
+          ? { singletonGeneration: Number(body.singletonGeneration) }
+          : {}),
       },
       $push: {
         processedMessages: {
@@ -473,21 +756,20 @@ export async function workerProcess(workerId, actorId, body) {
     e.status = 409;
     throw e;
   }
-  try {
-    await Message.create({
-      messageId: body.messageId,
-      actorId,
-      operation,
-      payload,
-      result,
-    });
-  } catch (error) {
-    if (error.code !== 11000)
-      console.error(
-        'Message result log failed after actor state commit:',
-        error.message,
-      );
-  }
+  instance.state = structuredClone(actor.state);
+  instance.lastActivityAt = Date.now();
+  await Message.updateOne(
+    { _id: message._id, status: 'PROCESSING' },
+    {
+      $set: {
+        status: 'COMPLETED',
+        result,
+        processedAt: new Date(),
+        lockedAt: null,
+        error: null,
+      },
+    },
+  );
   try {
     await redis.hSet(
       WORKER_KEY,
@@ -508,6 +790,187 @@ export async function workerProcess(workerId, actorId, body) {
     );
   }
   return { actor: await Actor.findOne({ actorId }), result };
+}
+
+export async function workerProcess(workerId, actorId, body) {
+  const key = `actorlab:actor:${actorId}:execution`;
+  const token = crypto.randomUUID();
+  const deadline =
+    Date.now() + Number(process.env.WORKER_REQUEST_TIMEOUT_MS || 5000);
+  while (Date.now() < deadline) {
+    const acquired = await redis.set(key, token, { NX: true, PX: 30000 });
+    if (acquired) {
+      const renewal = setInterval(() => {
+        redis
+          .eval(
+            `if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('pexpire', KEYS[1], ARGV[2]) else return 0 end`,
+            { keys: [key], arguments: [token, '30000'] },
+          )
+          .catch(() => {});
+      }, 10000);
+      renewal.unref?.();
+      try {
+        return await workerProcessLocked(workerId, actorId, {
+          ...body,
+          executionLeaseToken: token,
+        });
+      } catch (error) {
+        if (error.status === 400 || error.message === 'Insufficient funds') {
+          await Message.updateOne(
+            { messageId: body.messageId, status: 'PROCESSING' },
+            {
+              $set: { status: 'FAILED', error: error.message, lockedAt: null },
+            },
+          ).catch(() => {});
+        } else if (error.status === 409) {
+          await Message.updateOne(
+            { messageId: body.messageId, status: 'PROCESSING' },
+            { $set: { status: 'PENDING', lockedAt: null } },
+          ).catch(() => {});
+        }
+        throw error;
+      } finally {
+        clearInterval(renewal);
+        await redis
+          .eval(
+            `if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end`,
+            { keys: [key], arguments: [token] },
+          )
+          .catch(() => {});
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw Object.assign(
+    new Error(
+      'Actor is processing another message; retry with the same messageId',
+    ),
+    { status: 503 },
+  );
+}
+
+export async function recoverPendingMessages(workerId) {
+  const staleBefore = new Date(Date.now() - 30000);
+  await Message.updateMany(
+    { status: 'PROCESSING', lockedAt: { $lte: staleBefore } },
+    { $set: { status: 'PENDING', lockedAt: null } },
+  );
+  const ownedActors = await Actor.find({
+    workerId,
+    status: { $ne: 'migrating' },
+  })
+    .select('actorId ownerGeneration actorType')
+    .lean();
+  await Promise.all(
+    ownedActors.map(async (actor) => {
+      const message = await Message.findOne({
+        actorId: actor.actorId,
+        status: 'PENDING',
+      })
+        .sort({ sequence: 1 })
+        .lean();
+      if (!message) return;
+      try {
+        let singletonGeneration;
+        if (actor.actorType === 'GlobalSchedulerActor') {
+          const lease = await singletonStatus();
+          if (!lease.active || lease.owner !== workerId) return;
+          singletonGeneration = Number(lease.generation);
+        }
+        await workerProcess(workerId, actor.actorId, {
+          operation: message.operation,
+          payload: message.payload || {},
+          messageId: message.messageId,
+          sequence: message.sequence,
+          generation: actor.ownerGeneration,
+          singletonGeneration,
+        });
+      } catch (error) {
+        if (error.status !== 409 && error.status !== 503)
+          console.error(
+            `Pending message ${message.messageId} recovery failed:`,
+            error.message,
+          );
+      }
+    }),
+  );
+}
+
+export async function deactivateIdleActors(workerId) {
+  const idleMs = Number(process.env.ACTOR_IDLE_TIMEOUT_MS || 60000);
+  const cutoff = Date.now() - idleMs;
+  for (const [actorId, instance] of actorInstances) {
+    if (instance.workerId !== workerId) continue;
+    if (instance.lastActivityAt > cutoff) {
+      const ownerRaw = await redis.hGet(OWNER_KEY, actorId);
+      let owner;
+      try {
+        owner = ownerRaw ? JSON.parse(ownerRaw) : null;
+      } catch {}
+      if (
+        !owner ||
+        owner.workerId !== workerId ||
+        Number(owner.generation) !== instance.generation
+      )
+        actorInstances.delete(actorId);
+      continue;
+    }
+    const token = crypto.randomUUID();
+    const key = `actorlab:actor:${actorId}:execution`;
+    if (!(await redis.set(key, token, { NX: true, PX: 10000 }))) continue;
+    try {
+      const actor = await Actor.findOne({
+        actorId,
+        workerId,
+        ownerGeneration: instance.generation,
+        status: { $in: ['active', 'idle'] },
+        lastActiveAt: { $lte: new Date(cutoff) },
+      });
+      if (!actor) {
+        const ownerRaw = await redis.hGet(OWNER_KEY, actorId);
+        let owner;
+        try {
+          owner = ownerRaw ? JSON.parse(ownerRaw) : null;
+        } catch {}
+        if (
+          !owner ||
+          owner.workerId !== workerId ||
+          Number(owner.generation) !== instance.generation
+        )
+          actorInstances.delete(actorId);
+        continue;
+      }
+      if (actor.status === 'active') {
+        await Actor.updateOne(
+          { _id: actor._id, status: 'active' },
+          { $set: { status: 'idle' } },
+        );
+        continue;
+      }
+      await Actor.updateOne(
+        { _id: actor._id, status: 'idle' },
+        { $set: { status: 'deactivating' } },
+      );
+      // State is persisted after every acknowledged message; this final write
+      // makes the deactivation boundary explicit before dropping the instance.
+      await Actor.updateOne(
+        {
+          _id: actor._id,
+          status: 'deactivating',
+          ownerGeneration: instance.generation,
+        },
+        { $set: { state: instance.state, status: 'uninitialized' } },
+      );
+      actorInstances.delete(actorId);
+    } finally {
+      await redis
+        .eval(
+          `if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end`,
+          { keys: [key], arguments: [token] },
+        )
+        .catch(() => {});
+    }
+  }
 }
 
 async function getWorker(workerId) {
@@ -544,7 +1007,7 @@ export async function dashboardData() {
   };
 }
 
-export async function rebalance() {
+async function rebalanceUnlocked() {
   const workers = await listWorkers();
   if (workers.length < 2) {
     const e = new Error('At least two live workers are required to rebalance');
@@ -552,8 +1015,90 @@ export async function rebalance() {
     throw e;
   }
   const liveIds = new Set(workers.map((worker) => worker.workerId));
+  const resourceMetrics = await getWorkerResourceMetrics();
+  const pressure = (workerId) => {
+    const metric = resourceMetrics.workers[workerId];
+    if (!metric) return 0;
+    return (
+      (metric.cpuPercentOfRequest ?? metric.cpuMillicores / 10 ?? 0) +
+      (metric.memoryPercentOfRequest ?? metric.memoryBytes / (1024 * 1024) ?? 0)
+    );
+  };
+  const orphanedRecords = await ActorMigration.find({ status: 'MIGRATING' });
+  for (const migration of orphanedRecords) {
+    const current = await Actor.findOne({ actorId: migration.actorId }).select(
+      'workerId ownerGeneration status',
+    );
+    if (
+      current &&
+      current.status !== 'migrating' &&
+      current.ownerGeneration >= migration.toGeneration
+    ) {
+      await ActorMigration.updateOne(
+        { _id: migration._id, status: 'MIGRATING' },
+        { $set: { status: 'RECOVERED', completedAt: new Date() } },
+      );
+    }
+  }
+  const interrupted = await Actor.find({ status: 'migrating' });
+  for (const actor of interrupted) {
+    const previousOwnerId = actor.workerId;
+    const ownerRaw = await redis.hGet(OWNER_KEY, actor.actorId);
+    const owner = ownerRaw ? JSON.parse(ownerRaw) : null;
+    let repairedOwner = owner && liveIds.has(owner.workerId) ? owner : null;
+    if (!repairedOwner) {
+      const destination = await chooseWorker();
+      const replacement = {
+        workerId: destination.workerId,
+        generation:
+          Math.max(Number(owner?.generation || 0), actor.ownerGeneration || 0) +
+          1,
+        changedAt: new Date().toISOString(),
+      };
+      const cas = await redis.eval(
+        `local current = redis.call('hget', KEYS[1], ARGV[1]); if (current or '') == ARGV[2] then redis.call('hset', KEYS[1], ARGV[1], ARGV[3]); return 1 else return 0 end`,
+        {
+          keys: [OWNER_KEY],
+          arguments: [
+            actor.actorId,
+            ownerRaw || '',
+            JSON.stringify(replacement),
+          ],
+        },
+      );
+      if (Number(cas) === 1) repairedOwner = replacement;
+    }
+    if (repairedOwner && liveIds.has(repairedOwner.workerId)) {
+      await Actor.updateOne(
+        { _id: actor._id, status: 'migrating' },
+        {
+          $set: {
+            workerId: repairedOwner.workerId,
+            ownerGeneration: repairedOwner.generation,
+            status: 'uninitialized',
+          },
+        },
+      );
+      await ActorMigration.updateMany(
+        { actorId: actor.actorId, status: 'MIGRATING' },
+        { $set: { status: 'RECOVERED', completedAt: new Date() } },
+      );
+      const sourceWorker = workers.find(
+        (worker) => worker.workerId === previousOwnerId,
+      );
+      if (sourceWorker)
+        await fetch(
+          `${sourceWorker.url}/internal/actors/${encodeURIComponent(actor.actorId)}/resume`,
+          {
+            method: 'POST',
+            signal: AbortSignal.timeout(2000),
+          },
+        ).catch(() => {});
+    }
+  }
   const actors = await Actor.find({
     workerId: { $ne: null },
+    status: { $ne: 'migrating' },
     actorType: { $ne: 'GlobalSchedulerActor' },
   }).sort({ createdAt: 1 });
   actors.sort(
@@ -565,14 +1110,19 @@ export async function rebalance() {
       counts.set(actor.workerId, counts.get(actor.workerId) + 1);
   let moved = 0;
   for (const actor of actors) {
-    const donor = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
-    const receiver = [...counts.entries()].sort((a, b) => a[1] - b[1])[0];
+    const donor = [...counts.entries()].sort(
+      (a, b) => b[1] * 10 + pressure(b[0]) - (a[1] * 10 + pressure(a[0])),
+    )[0];
+    const receiver = [...counts.entries()].sort(
+      (a, b) => a[1] * 10 + pressure(a[0]) - (b[1] * 10 + pressure(b[0])),
+    )[0];
     const failedWorker = !liveIds.has(actor.workerId);
+    if (!donor || !receiver || (!failedWorker && donor[0] === receiver[0]))
+      break;
     if (
-      !donor ||
-      !receiver ||
-      (!failedWorker &&
-        (donor[1] - receiver[1] <= 1 || donor[0] === receiver[0]))
+      !failedWorker &&
+      donor[1] - receiver[1] <= 1 &&
+      Math.abs(pressure(donor[0]) - pressure(receiver[0])) <= 25
     )
       break;
     if (!failedWorker && actor.workerId !== donor[0]) continue;
@@ -581,25 +1131,51 @@ export async function rebalance() {
       ? JSON.parse(current)
       : { generation: actor.ownerGeneration };
     const oldWorker = workers.find((w) => w.workerId === actor.workerId);
+    const sourceWorkerId = actor.workerId;
+    const fromGeneration = Number(
+      oldAssignment.generation || actor.ownerGeneration || 0,
+    );
     actor.status = 'migrating';
     await actor.save();
-    if (oldWorker)
+    const migration = await ActorMigration.create({
+      actorId: actor.actorId,
+      sourceWorkerId,
+      destinationWorkerId: receiver[0],
+      fromGeneration,
+      toGeneration: fromGeneration + 1,
+      status: 'MIGRATING',
+    });
+    if (oldWorker) {
       try {
-        await fetch(
+        const drainResponse = await fetch(
           `${oldWorker.url}/internal/actors/${encodeURIComponent(actor.actorId)}/drain`,
           { method: 'POST', signal: AbortSignal.timeout(3000) },
         );
-      } catch {
-        /* state is durable after each message */
+        if (!drainResponse.ok)
+          throw new Error(
+            `Source worker drain returned ${drainResponse.status}`,
+          );
+      } catch (error) {
+        actor.status = 'uninitialized';
+        await actor.save();
+        await ActorMigration.updateOne(
+          { _id: migration._id },
+          {
+            $set: {
+              status: 'FAILED',
+              error: error.message,
+              completedAt: new Date(),
+            },
+          },
+        );
+        continue;
       }
+    }
     const next = {
       workerId: receiver[0],
-      generation: oldAssignment.generation + 1,
+      generation: fromGeneration + 1,
       changedAt: new Date().toISOString(),
     };
-    actor.workerId = receiver[0];
-    actor.ownerGeneration = next.generation;
-    await actor.save();
     let swapped;
     try {
       swapped = await redis.eval(
@@ -612,6 +1188,21 @@ export async function rebalance() {
     } catch (error) {
       actor.status = 'idle';
       await actor.save();
+      await ActorMigration.updateOne(
+        { _id: migration._id },
+        {
+          $set: {
+            status: 'FAILED',
+            error: error.message,
+            completedAt: new Date(),
+          },
+        },
+      );
+      if (oldWorker)
+        await fetch(
+          `${oldWorker.url}/internal/actors/${encodeURIComponent(actor.actorId)}/resume`,
+          { method: 'POST', signal: AbortSignal.timeout(2000) },
+        ).catch(() => {});
       throw error;
     }
     if (Number(swapped) !== 1) {
@@ -623,10 +1214,36 @@ export async function rebalance() {
       }
       actor.status = 'idle';
       await actor.save();
+      await ActorMigration.updateOne(
+        { _id: migration._id },
+        {
+          $set: {
+            status: 'FAILED',
+            error: 'Ownership compare-and-set failed',
+            completedAt: new Date(),
+          },
+        },
+      );
+      if (oldWorker)
+        await fetch(
+          `${oldWorker.url}/internal/actors/${encodeURIComponent(actor.actorId)}/resume`,
+          { method: 'POST', signal: AbortSignal.timeout(2000) },
+        ).catch(() => {});
       continue;
     }
-    actor.status = 'idle';
+    actor.workerId = receiver[0];
+    actor.ownerGeneration = next.generation;
+    actor.status = 'uninitialized';
     await actor.save();
+    await ActorMigration.updateOne(
+      { _id: migration._id },
+      { $set: { status: 'COMPLETED', completedAt: new Date() } },
+    );
+    if (oldWorker)
+      await fetch(
+        `${oldWorker.url}/internal/actors/${encodeURIComponent(actor.actorId)}/resume`,
+        { method: 'POST', signal: AbortSignal.timeout(2000) },
+      ).catch(() => {});
     if (!failedWorker) counts.set(donor[0], counts.get(donor[0]) - 1);
     counts.set(receiver[0], counts.get(receiver[0]) + 1);
     moved += 1;
@@ -639,22 +1256,60 @@ export async function rebalance() {
   return { moved, distribution: Object.fromEntries(counts) };
 }
 
+export async function rebalance() {
+  const token = crypto.randomUUID();
+  const lockKey = 'actorlab:coordinator:rebalance';
+  const locked = await redis.set(lockKey, token, { NX: true, PX: 120000 });
+  if (!locked)
+    throw Object.assign(new Error('A rebalance is already in progress'), {
+      status: 409,
+    });
+  const renewal = setInterval(() => {
+    redis
+      .eval(
+        `if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('pexpire', KEYS[1], ARGV[2]) else return 0 end`,
+        { keys: [lockKey], arguments: [token, '120000'] },
+      )
+      .catch(() => {});
+  }, 30000);
+  renewal.unref?.();
+  try {
+    return await rebalanceUnlocked();
+  } finally {
+    clearInterval(renewal);
+    await redis
+      .eval(
+        `if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end`,
+        { keys: [lockKey], arguments: [token] },
+      )
+      .catch(() => {});
+  }
+}
+
 export async function acquireSingleton(workerId) {
   const ttl = Number(process.env.SINGLETON_LEASE_MS || 12000);
   const token = crypto.randomUUID();
-  const acquired = await redis.set(
-    LEASE_KEY,
-    JSON.stringify({ workerId, token }),
-    { NX: true, PX: ttl },
+  const expiresAt = new Date(Date.now() + ttl).toISOString();
+  const scheduler = await Actor.findOne({ actorType: 'GlobalSchedulerActor' })
+    .select('singletonGeneration')
+    .lean();
+  const generation = Number(
+    await redis.eval(acquireLeaseScript, {
+      keys: [
+        LEASE_KEY,
+        'actorlab:singleton:generation',
+        'actorlab:singleton:status',
+      ],
+      arguments: [
+        workerId,
+        token,
+        String(ttl),
+        expiresAt,
+        String(scheduler?.singletonGeneration || 0),
+      ],
+    }),
   );
-  if (acquired) {
-    const generation = await redis.incr('actorlab:singleton:generation');
-    await redis.hSet('actorlab:singleton:status', {
-      workerId,
-      token,
-      generation: String(generation),
-      expiresAt: new Date(Date.now() + ttl).toISOString(),
-    });
+  if (generation > 0) {
     await recordEvent(
       'singleton.acquired',
       `GlobalSchedulerActor lease acquired by ${workerId}`,
@@ -672,21 +1327,18 @@ export async function acquireSingleton(workerId) {
 
 export async function renewSingleton(lease) {
   const ttl = Number(process.env.SINGLETON_LEASE_MS || 12000);
-  const renewed = await redis.eval(leaseScript, {
-    keys: [LEASE_KEY],
+  const expiresAt = new Date(Date.now() + ttl).toISOString();
+  const renewed = await redis.eval(renewLeaseScript, {
+    keys: [LEASE_KEY, 'actorlab:singleton:status'],
     arguments: [
-      JSON.stringify({ workerId: lease.workerId, token: lease.token }),
+      lease.workerId,
+      lease.token,
+      String(lease.generation),
       String(ttl),
+      expiresAt,
     ],
   });
   if (Number(renewed)) {
-    const expiresAt = new Date(Date.now() + ttl).toISOString();
-    await redis.hSet('actorlab:singleton:status', {
-      workerId: lease.workerId,
-      token: lease.token,
-      generation: String(lease.generation),
-      expiresAt,
-    });
     return { ...lease, expiresAt };
   }
   return null;
@@ -713,7 +1365,9 @@ export async function singletonStatus() {
       owner: owner.workerId,
       active: true,
       expiresAt: state.expiresAt,
-      generation: state.generation,
+      generation: owner.generation || state.generation,
+      renewedAt: state.renewedAt || null,
+      renewalStatus: 'ACTIVE',
     };
   } catch {
     return {

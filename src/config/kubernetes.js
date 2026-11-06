@@ -1,4 +1,4 @@
-import { KubeConfig, CoreV1Api, AppsV1Api } from '@kubernetes/client-node';
+import { KubeConfig, CoreV1Api, AppsV1Api, CustomObjectsApi } from '@kubernetes/client-node';
 
 let clients;
 let connectionError;
@@ -26,6 +26,7 @@ export function getKubeClients() {
     clients = {
       core: config.makeApiClient(CoreV1Api),
       apps: config.makeApiClient(AppsV1Api),
+      custom: config.makeApiClient(CustomObjectsApi),
     };
   } catch (error) {
     connectionError = error;

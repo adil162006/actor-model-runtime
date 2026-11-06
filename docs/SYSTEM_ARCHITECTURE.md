@@ -27,7 +27,7 @@ The deployment and request path are shown in
 | Worker manager/registry                               | Workers self-register and heartbeat via `/internal`; Redis hash `actorlab:workers` tracks their advertised URLs and heartbeat details.                          |
 | Worker process                                        | A worker runs an Express server, local per-actor promise queues, health/drain endpoints, registration, heartbeat, and lease renewal.                            |
 | MongoDB                                               | Stores actor documents, message result records, and expiring runtime events.                                                                                    |
-| Redis                                                 | Stores worker and owner hashes; singleton lease string, status hash, and generation counter. No Redis Stream is used.                                           |
+| Redis                                                 | Stores worker and owner hashes; singleton lease string, status hash, and generation counter. MongoDB is the durable mailbox; Redis Streams are not used.        |
 | Kubernetes client                                     | Uses in-cluster config or local kubeconfig to list worker pods, read logs, and patch the named worker Deployment.                                               |
 | Kubernetes                                            | Schedules/restarts containers and applies replica counts; it does not implement actor routing or move actor state.                                              |
 | EJS dashboard                                         | Server renders actor/runtime/cluster observations; the pages use HTML form submissions for several actions.                                                     |
@@ -56,9 +56,9 @@ sequenceDiagram
 
 The persisted actor state is reloaded for each worker operation. A worker does
 not retain a continuously running JavaScript actor instance. Same-actor
-serialization is an in-memory queue within one worker process; the MongoDB
-version and ownership conditions protect against conflicting/stale writes but
-do not make that queue distributed.
+serialization uses a local queue plus an actor-scoped Redis execution lease;
+MongoDB version and ownership conditions reject stale writes. The lease is
+time limited and the inbound queue is not durable.
 
 ### Component interaction
 
@@ -87,15 +87,13 @@ The standalone diagram is
 ### Actor creation flow
 
 1. The API validates the ID and one of three supported types.
-2. `createActor` chooses a live worker using least assigned actor count.
-3. MongoDB creates the actor with type-specific initial state, `idle` status,
-   version 0, owner generation 1, and worker ID.
-4. Redis hash `actorlab:owners` is written with worker ID, generation, and
-   change timestamp.
-5. A runtime event is attempted.
-
-If there is no live worker, actor creation fails with a service-unavailable
-error. Actor creation does not itself call or activate the worker.
+2. MongoDB creates an `uninitialized` actor with initial state, generation 0, and
+   no owner.
+3. The first message is persisted with a per-actor sequence and assigned to a
+   live worker. The worker activates the actor from MongoDB state on demand.
+4. The Redis owner hash stores the live worker and monotonically increasing
+   generation; MongoDB keeps the durable owner generation.
+5. A runtime event is attempted. Actor creation does not require a worker.
 
 ### Dashboard data
 

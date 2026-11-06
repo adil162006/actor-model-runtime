@@ -2,16 +2,17 @@
 
 ## What the implementation does
 
-Rebalancing is a manually triggered routine (`POST /api/rebalance` or the
-Rebalancing page). It requires at least two workers considered live by the
+Rebalancing runs periodically in the API process (30 seconds by default) and
+can also be manually triggered (`POST /api/rebalance` or the Rebalancing page).
+A Redis coordinator lock prevents overlapping runs. It requires at least two workers considered live by the
 Redis heartbeat registry. It loads assigned actors except
 `GlobalSchedulerActor`, counts actors assigned to currently live workers, and
 moves actors when the most-loaded and least-loaded worker counts differ by
 more than one. Actors assigned to workers no longer live are prioritized and
 may be moved even without that count difference.
 
-This is actor-count balancing, not measured CPU/memory/latency balancing. There
-is no automatic trigger when a worker joins, leaves, or a Deployment scales.
+This is actor-count balancing, not measured CPU/memory/latency balancing. The
+periodic pass detects registry changes indirectly; it does not watch Pod events.
 
 ## Transfer steps
 

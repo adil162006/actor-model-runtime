@@ -19,7 +19,7 @@
         required
         maxlength="120"
         placeholder="counter-orders"
-        pattern="[A-Za-z0-9][A-Za-z0-9._:-]{0,119}" /></label
+        pattern="[A-Za-z0-9][A-Za-z0-9._:\-]{0,119}" /></label
     ><label
       >Actor type<select name="actorType">
         <option>CounterActor</option>
@@ -29,6 +29,30 @@
     ><button class="button primary" type="submit">
       Create actor <span>＋</span>
     </button>
+  </form>
+</section>
+<section class="panel form-panel demo-panel">
+  <div class="panel-heading">
+    <div>
+      <h2>Demo mode</h2>
+      <small>Reset the presentation data without stopping live workers.</small>
+    </div>
+    <span class="badge balanced">LOCAL DEMO</span>
+  </div>
+  <p class="subtle">
+    Reset removes actors, messages, migrations, and runtime events. Worker
+    registrations are preserved. Then run <code>npm run demo:seed</code> to load
+    the repeatable banking and counter demonstration dataset.
+  </p>
+  <form class="demo-reset-form" method="post" action="/demo/reset">
+    <label
+      >Confirmation<input
+        name="confirmation"
+        required
+        autocomplete="off"
+        placeholder="RESET DEMO"
+        aria-label="Type RESET DEMO to confirm" /></label
+    ><button class="button danger" type="submit">Reset demo data</button>
   </form>
 </section>
 <section class="panel table-panel">
@@ -47,6 +71,8 @@
           <th>TYPE</th>
           <th>STATUS</th>
           <th>WORKER</th>
+          <th>OWNER GENERATION</th>
+          <th>PENDING MESSAGES</th>
           <th>VERSION</th>
           <th>LAST ACTIVE</th>
           <th></th>
@@ -66,7 +92,9 @@
               ><%= actor.status.toUpperCase() %></span
             >
           </td>
-          <td><%= actor.workerId || '—' %></td>
+          <td><%= actor.ownerStatus==='ACTIVE' ? actor.workerId : actor.ownerStatus==='UNAVAILABLE' ? `UNAVAILABLE: ${actor.workerId}` : 'UNASSIGNED' %></td>
+          <td><%= actor.ownerGeneration || 0 %></td>
+          <td><%= actor.pendingMessageCount || 0 %></td>
           <td><%= actor.version %></td>
           <td><%= actor.lastActiveAt ? new
             Date(actor.lastActiveAt).toLocaleString() : '—' %></td>

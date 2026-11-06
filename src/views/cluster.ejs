@@ -17,7 +17,7 @@
     <p><%= cluster.message %></p>
     <% if(cluster.deployment){ %>
     <p>
-      Worker deployment: <%= cluster.deployment.readyReplicas || 0 %> ready / <%= cluster.deployment.replicas || 0 %>
+      Worker deployment: <%= cluster.deploymentStatus?.readyReplicas || 0 %> ready / <%= cluster.deployment?.replicas || 0 %>
       desired replicas
     </p>
     <% } %>
@@ -41,6 +41,9 @@
           <tr>
             <th>POD</th>
             <th>STATUS</th>
+            <th>READY</th>
+            <th>CPU</th>
+            <th>MEMORY</th>
             <th>IP</th>
             <th>NODE</th>
             <th></th>
@@ -51,6 +54,9 @@
           <tr>
             <td><%= pod.metadata?.name %></td>
             <td><%= pod.status?.phase %></td>
+            <td><%= pod.status?.conditions?.find(condition=>condition.type==='Ready')?.status || 'Unknown' %></td>
+            <td><%= cluster.resourceMetrics?.workers?.[pod.metadata?.name]?.cpuMillicores != null ? `${cluster.resourceMetrics.workers[pod.metadata.name].cpuMillicores}m` : '—' %></td>
+            <td><%= cluster.resourceMetrics?.workers?.[pod.metadata?.name]?.memoryBytes != null ? `${Math.round(cluster.resourceMetrics.workers[pod.metadata.name].memoryBytes / 1048576)} MiB` : '—' %></td>
             <td><%= pod.status?.podIP || '—' %></td>
             <td><%= pod.spec?.nodeName || '—' %></td>
             <td><a href="/cluster/logs/<%= encodeURIComponent(pod.metadata?.name) %>">Logs →</a></td>
@@ -85,7 +91,29 @@
     </form>
   </section>
 </div>
-<% if(logError){ %>
+<% if(cluster.connected && cluster.nodes?.length){ %>
+<section class="panel table-panel">
+  <div class="panel-heading"><h2>Kubernetes nodes</h2></div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>NODE</th>
+          <th>READY</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% cluster.nodes.forEach(node=>{ %>
+        <tr>
+          <td><%= node.metadata?.name %></td>
+          <td><%= node.status?.conditions?.find(condition=>condition.type==='Ready')?.status || 'Unknown' %></td>
+        </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  </div>
+</section>
+<% } %> <% if(logError){ %>
 <div class="flash error"><%= logError %></div>
 <% } %><% if(logs){ %>
 <section class="panel table-panel">

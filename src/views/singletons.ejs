@@ -28,6 +28,7 @@
       <div><small>OWNER</small><b><%= state.owner || 'No current owner' %></b></div>
       <div><small>FENCING GENERATION</small><b><%= state.generation || '—' %></b></div>
       <div><small>LEASE EXPIRY</small><b><%= state.expiresAt ? new Date(state.expiresAt).toLocaleTimeString() : '—' %></b></div>
+      <div><small>LAST RENEWAL</small><b><%= state.renewedAt ? new Date(state.renewedAt).toLocaleTimeString() : '—' %></b></div>
     </div>
     <p class="subtle">
       The healthy worker renews its lease. Another worker may acquire it after

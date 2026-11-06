@@ -6,7 +6,8 @@
     <h1>Rebalancing</h1>
     <p>
       Redistribute actors by count across live workers while preserving durable
-      state.
+      state. The API also checks the registry on a 30-second interval and on
+      worker registration or drain.
     </p>
   </div>
   <form method="post" action="/rebalancing/trigger">
@@ -18,9 +19,10 @@
 <div class="note-bar">
   <span class="note-symbol">i</span>
   <p>
-    Migration drains the old worker mailbox, relies on each message’s MongoDB
-    commit, then uses a Redis compare-and-set ownership update with an
-    incremented fencing generation.
+    Migration marks the actor unavailable, drains the old worker, waits for its
+    distributed execution lease, then compare-and-sets the Redis owner before
+    persisting the new MongoDB generation. Pending MongoDB messages remain
+    available for destination recovery.
   </p>
 </div>
 <section class="panel table-panel">
@@ -38,7 +40,10 @@
     <% workers.forEach(worker=>{const count=actors.filter(a=>a.workerId===worker.workerId).length; %>
     <div class="dist-row">
       <div>
-        <b><%= worker.workerId %></b><small><%= worker.host || worker.url %></small>
+        <b><%= worker.workerId %></b
+        ><small
+          ><%= worker.host || worker.url %> · target about <%= Math.ceil(actors.filter(a=>a.workerId).length / workers.length) %></small
+        >
       </div>
       <div class="dist-bar"><i style="width: <%= Math.max(4,actors.length?count/actors.length*100:0) %>%"></i></div>
       <strong><%= count %></strong>
@@ -55,7 +60,7 @@
   <div class="panel-heading">
     <div>
       <h2>Rebalance and failover events</h2>
-      <small>Recent coordination events</small>
+      <small>Recent coordinator events and persisted migration records</small>
     </div>
   </div>
   <% if(events.length){ %>
@@ -70,5 +75,43 @@
   </div>
   <% }else{ %>
   <div class="empty">No migration events recorded.</div>
+  <% } %>
+</section>
+<section class="panel table-panel">
+  <div class="panel-heading">
+    <div>
+      <h2>Migration history</h2>
+      <small><%= migrations.length %> recorded transfer(s)</small>
+    </div>
+  </div>
+  <% if(migrations.length){ %>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>ACTOR</th>
+          <th>SOURCE POD</th>
+          <th>DESTINATION POD</th>
+          <th>GENERATION</th>
+          <th>STATUS</th>
+          <th>STARTED</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% migrations.forEach(migration=>{ %>
+        <tr>
+          <td><%= migration.actorId %></td>
+          <td><%= migration.sourceWorkerId || 'UNASSIGNED' %></td>
+          <td><%= migration.destinationWorkerId %></td>
+          <td><%= migration.fromGeneration %> → <%= migration.toGeneration %></td>
+          <td><%= migration.status %><%= migration.error ? `: ${migration.error}` : '' %></td>
+          <td><%= new Date(migration.startedAt).toLocaleString() %></td>
+        </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  </div>
+  <% }else{ %>
+  <div class="empty">No persisted migrations yet.</div>
   <% } %>
 </section>

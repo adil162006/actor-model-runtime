@@ -16,14 +16,17 @@ export async function getClusterStatus() {
         namespace,
         labelSelector: 'app=actor-worker',
       });
+      const nodes = await clients.core.listNode();
+      const resourceMetrics = await getWorkerResourceMetrics();
       let deployment = null;
+      let deploymentStatus = null;
       try {
-        deployment = (
-          await clients.apps.readNamespacedDeployment({
-            name: deploymentName,
-            namespace,
-          })
-        ).spec;
+        const result = await clients.apps.readNamespacedDeployment({
+          name: deploymentName,
+          namespace,
+        });
+        deployment = result.spec;
+        deploymentStatus = result.status;
       } catch {}
       return {
         connected: true,
@@ -32,7 +35,10 @@ export async function getClusterStatus() {
           ? 'Connected to Kubernetes'
           : `Cluster reachable; ${deploymentName} Deployment was not found in ${namespace}`,
         pods: pods.items,
+        nodes: nodes.items,
         deployment,
+        deploymentStatus,
+        resourceMetrics,
       };
     };
     let timer;
@@ -57,6 +63,82 @@ export async function getClusterStatus() {
 export async function getPods() {
   const status = await getClusterStatus();
   return status.connected ? status.pods : [];
+}
+
+function quantity(value, cpu = false) {
+  if (!value) return 0;
+  const match = String(value).match(/^([\d.]+)([a-zA-Z]*)$/);
+  if (!match) return 0;
+  const number = Number(match[1]);
+  const unit = match[2];
+  if (cpu)
+    return unit === 'n'
+      ? number / 1e6
+      : unit === 'u'
+        ? number / 1e3
+        : unit === 'm'
+          ? number
+          : number * 1000;
+  const factors = {
+    Ki: 1024,
+    Mi: 1024 ** 2,
+    Gi: 1024 ** 3,
+    Ti: 1024 ** 4,
+    k: 1000,
+    M: 1000 ** 2,
+    G: 1000 ** 3,
+  };
+  return number * (factors[unit] || 1);
+}
+
+export async function getWorkerResourceMetrics() {
+  const { clients } = getKubeClients();
+  if (!clients) return { available: false, workers: {} };
+  try {
+    const metrics = await clients.custom.listNamespacedCustomObject(
+      'metrics.k8s.io',
+      'v1beta1',
+      namespace,
+      'pods',
+    );
+    const pods = await clients.core.listNamespacedPod({
+      namespace,
+      labelSelector: 'app=actor-worker',
+    });
+    const podMap = new Map(pods.items.map((pod) => [pod.metadata?.name, pod]));
+    const workers = {};
+    for (const item of metrics.items || metrics.body?.items || []) {
+      const pod = podMap.get(item.metadata?.name);
+      if (!pod) continue;
+      const usage = (item.containers || []).reduce(
+        (sum, container) => ({
+          cpu: sum.cpu + quantity(container.usage?.cpu, true),
+          memory: sum.memory + quantity(container.usage?.memory),
+        }),
+        { cpu: 0, memory: 0 },
+      );
+      const requests = (pod.spec?.containers || []).reduce(
+        (sum, container) => ({
+          cpu: sum.cpu + quantity(container.resources?.requests?.cpu, true),
+          memory: sum.memory + quantity(container.resources?.requests?.memory),
+        }),
+        { cpu: 0, memory: 0 },
+      );
+      workers[item.metadata.name] = {
+        cpuMillicores: Math.round(usage.cpu),
+        memoryBytes: Math.round(usage.memory),
+        cpuPercentOfRequest: requests.cpu
+          ? Math.round((usage.cpu / requests.cpu) * 100)
+          : null,
+        memoryPercentOfRequest: requests.memory
+          ? Math.round((usage.memory / requests.memory) * 100)
+          : null,
+      };
+    }
+    return { available: Object.keys(workers).length > 0, workers };
+  } catch {
+    return { available: false, workers: {} };
+  }
 }
 export async function getWorkers() {
   return (await getPods()).map((pod) => ({

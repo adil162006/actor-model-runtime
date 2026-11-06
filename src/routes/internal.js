@@ -4,6 +4,7 @@ import {
   heartbeat,
   acquireSingleton,
   renewSingleton,
+  drainWorker,
 } from '../services/runtime.js';
 import { asyncHandler } from '../middleware/errors.js';
 const router = Router();
@@ -16,6 +17,12 @@ router.post(
 router.post(
   '/workers/heartbeat',
   asyncHandler(async (req, res) => res.json(await heartbeat(req.body))),
+);
+router.post(
+  '/workers/drain',
+  asyncHandler(async (req, res) =>
+    res.json(await drainWorker(req.body.workerId)),
+  ),
 );
 router.post(
   '/singletons/acquire',

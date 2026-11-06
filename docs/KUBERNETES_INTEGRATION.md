@@ -13,10 +13,8 @@ Deployment's spec, reads up to 100 lines of pod logs, and patches the worker
 Deployment replica count. The JSON API and page validate requested replicas in
 the range 0–50. Kubernetes request timeout defaults to 3000 ms. If no client is
 configured or the query fails, the UI/API reports local/unavailable status.
-The status helper retains only the Deployment `spec`, not its status object;
-therefore, the Cluster template's `readyReplicas` lookup falls back to `0`.
-Pod readiness should be checked from the listed pod statuses or with
-`kubectl`, not inferred from that displayed Deployment-ready count.
+The status helper retains the Deployment spec and status, and lists actual
+nodes and Pod readiness conditions. CPU and memory metrics are not queried.
 
 ## Resources in this repository
 
@@ -35,8 +33,8 @@ Pod readiness should be checked from the listed pod statuses or with
 
 The API does not send actor messages through the Kubernetes API. Workers
 register their HTTP URL in Redis and the API sends direct HTTP requests to that
-URL. The worker Deployment supplies pod name and pod IP through the downward
-API. If no explicit `WORKER_ADVERTISE_HOST` or `POD_IP` is set, the worker
+URL. The worker Deployment supplies pod name, namespace, and pod IP through the downward
+API. Pod name is the worker identity. If no explicit `WORKER_ADVERTISE_HOST` or `POD_IP` is set, the worker
 builds the name
 `<POD_NAME>.actor-worker-headless.actorlab.svc.cluster.local`.
 This DNS fallback embeds the `actorlab` namespace and assumes the sample
@@ -69,7 +67,7 @@ flowchart TB
 The API patches the `actor-worker` Deployment; Kubernetes creates/removes pods.
 New worker containers register and heartbeat after startup. Kubernetes does
 not itself update Redis actor assignments or trigger the runtime rebalancer.
-The sample uses readiness probes, but no liveness probes, resource requests,
+The sample uses readiness and liveness probes plus a termination grace period, but no resource requests,
 autoscaler, NetworkPolicy, TLS, or database authentication.
 
 See [deployment guide](DEPLOYMENT_GUIDE.md) and

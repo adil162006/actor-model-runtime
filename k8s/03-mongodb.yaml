@@ -16,6 +16,8 @@ metadata:
   namespace: actorlab
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: mongodb
@@ -34,11 +36,19 @@ spec:
             - name: data
               mountPath: /data/db
           readinessProbe:
-            exec:
-              command:
-                ['mongosh', '--quiet', '--eval', "db.adminCommand('ping').ok"]
-            initialDelaySeconds: 5
+            tcpSocket:
+              port: mongodb
+            initialDelaySeconds: 20
+            timeoutSeconds: 3
             periodSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            tcpSocket:
+              port: mongodb
+            initialDelaySeconds: 60
+            timeoutSeconds: 3
+            periodSeconds: 10
+            failureThreshold: 6
       volumes:
         - name: data
           persistentVolumeClaim:

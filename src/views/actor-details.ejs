@@ -19,7 +19,7 @@
     </div>
     <pre class="json-state"><%= JSON.stringify(actor.state,null,2) %></pre>
     <div class="metadata">
-      <div><small>WORKER</small><b><%= actor.workerId || 'Unassigned' %></b></div>
+      <div><small>OWNER POD</small><b><%= actor.ownerStatus==='ACTIVE' ? actor.workerId : actor.ownerStatus==='UNAVAILABLE' ? `UNAVAILABLE: ${actor.workerId}` : 'UNASSIGNED' %></b></div>
       <div><small>VERSION</small><b><%= actor.version %></b></div>
       <div><small>LAST ACTIVE</small><b><%= actor.lastActiveAt ? new
           Date(actor.lastActiveAt).toLocaleString() : '—' %></b></div>

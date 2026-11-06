@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import Actor from '../models/Actor.js';
 import Message from '../models/Message.js';
+import ActorMigration from '../models/ActorMigration.js';
 import {
   createActor,
   sendMessage,
@@ -30,9 +31,20 @@ router.get(
 );
 router.get(
   '/actors',
-  asyncHandler(async (_req, res) =>
-    res.json(await Actor.find().sort({ createdAt: -1 }).lean()),
-  ),
+  asyncHandler(async (_req, res) => {
+    const actors = await Actor.find().sort({ createdAt: -1 }).lean();
+    const pending = await Message.aggregate([
+      { $match: { status: { $in: ['PENDING', 'PROCESSING'] } } },
+      { $group: { _id: '$actorId', count: { $sum: 1 } } },
+    ]);
+    const counts = new Map(pending.map((item) => [item._id, item.count]));
+    res.json(
+      actors.map((actor) => ({
+        ...actor,
+        pendingMessageCount: counts.get(actor.actorId) || 0,
+      })),
+    );
+  }),
 );
 router.post(
   '/actors',
@@ -138,6 +150,20 @@ router.get(
     const status = await getClusterStatus();
     res.json({
       ...status,
+      nodes: status.connected
+        ? (status.nodes || []).map((node) => ({
+            name: node.metadata?.name,
+            status:
+              node.status?.conditions?.find(
+                (condition) => condition.type === 'Ready',
+              )?.status || 'Unknown',
+          }))
+        : [],
+      deploymentStatus: status.deploymentStatus || null,
+      resourceMetrics: status.resourceMetrics || {
+        available: false,
+        workers: {},
+      },
       workers: status.connected
         ? (status.pods || []).map((pod) => ({
             name: pod.metadata?.name,
@@ -170,5 +196,13 @@ router.get(
 router.get(
   '/events',
   asyncHandler(async (_req, res) => res.json(await allRuntimeEvents())),
+);
+router.get(
+  '/migrations',
+  asyncHandler(async (_req, res) =>
+    res.json(
+      await ActorMigration.find().sort({ startedAt: -1 }).limit(100).lean(),
+    ),
+  ),
 );
 export default router;

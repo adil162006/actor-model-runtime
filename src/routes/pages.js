@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import Actor from '../models/Actor.js';
 import Message from '../models/Message.js';
+import ActorMigration from '../models/ActorMigration.js';
 import {
   dashboardData,
   listWorkers,
@@ -10,6 +11,7 @@ import {
   createActor,
   sendMessage,
   recordEvent,
+  resetDemoData,
 } from '../services/runtime.js';
 import {
   getClusterStatus,
@@ -33,11 +35,27 @@ router.get(
 );
 router.get(
   '/actors',
-  asyncHandler(async (_req, res) =>
+  asyncHandler(async (_req, res) => {
+    const actors = await Actor.find().sort({ createdAt: -1 }).lean();
+    const workers = await listWorkers();
+    const activeIds = new Set(workers.map((worker) => worker.workerId));
+    const pending = await Message.aggregate([
+      { $match: { status: { $in: ['PENDING', 'PROCESSING'] } } },
+      { $group: { _id: '$actorId', count: { $sum: 1 } } },
+    ]);
+    const counts = new Map(pending.map((item) => [item._id, item.count]));
     render(res, 'actors', 'Actors', {
-      actors: await Actor.find().sort({ createdAt: -1 }).lean(),
-    }),
-  ),
+      actors: actors.map((actor) => ({
+        ...actor,
+        pendingMessageCount: counts.get(actor.actorId) || 0,
+        ownerStatus: !actor.workerId
+          ? 'UNASSIGNED'
+          : activeIds.has(actor.workerId)
+            ? 'ACTIVE'
+            : 'UNAVAILABLE',
+      })),
+    });
+  }),
 );
 router.get(
   '/actors/:id',
@@ -49,6 +67,12 @@ router.get(
         page: 'Not found',
         message: 'Actor not found',
       });
+    const liveWorkers = await listWorkers();
+    actor.ownerStatus = !actor.workerId
+      ? 'UNASSIGNED'
+      : liveWorkers.some((worker) => worker.workerId === actor.workerId)
+        ? 'ACTIVE'
+        : 'UNAVAILABLE';
     const messages = await Message.find({ actorId: actor.actorId })
       .sort({ createdAt: -1 })
       .limit(20)
@@ -65,9 +89,15 @@ router.get(
     const cluster = await getClusterStatus();
     const clusterWorkers = (cluster.pods || []).map((pod) => ({
       name: pod.metadata?.name,
+      workerId: pod.metadata?.name,
+      namespace: pod.metadata?.namespace,
       status: pod.status?.phase,
       ip: pod.status?.podIP,
+      ready:
+        pod.status?.conditions?.find((condition) => condition.type === 'Ready')
+          ?.status === 'True',
       node: pod.spec?.nodeName,
+      metrics: cluster.resourceMetrics?.workers?.[pod.metadata?.name] || null,
     }));
     return render(res, 'workers', 'Workers', {
       ...registry,
@@ -87,6 +117,10 @@ router.get(
       ...registry,
       actors: await Actor.find().lean(),
       events: await allRuntimeEvents(20),
+      migrations: await ActorMigration.find()
+        .sort({ startedAt: -1 })
+        .limit(30)
+        .lean(),
     });
   }),
 );
@@ -168,6 +202,25 @@ router.post(
         actorType: req.body.actorType,
       });
       res.redirect(`/actors/${encodeURIComponent(actor.actorId)}`);
+    } catch (error) {
+      res.redirect(`/actors?error=${encodeURIComponent(error.message)}`);
+    }
+  }),
+);
+router.post(
+  '/demo/reset',
+  asyncHandler(async (req, res) => {
+    if (String(req.body.confirmation || '').trim() !== 'RESET DEMO')
+      return res.redirect(
+        '/actors?error=Type%20RESET%20DEMO%20to%20confirm%20the%20demo%20reset',
+      );
+    try {
+      const result = await resetDemoData();
+      res.redirect(
+        `/actors?message=${encodeURIComponent(
+          `Demo reset: removed ${result.actors} actors, ${result.messages} messages, and runtime history`,
+        )}`,
+      );
     } catch (error) {
       res.redirect(`/actors?error=${encodeURIComponent(error.message)}`);
     }

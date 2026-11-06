@@ -24,8 +24,15 @@
         <tr>
           <th>WORKER ID</th>
           <th>HOST</th>
+          <th>NAMESPACE</th>
+          <th>POD IP</th>
+          <th>STATUS</th>
+          <th>POD READINESS</th>
           <th>URL</th>
           <th>ACTIVE ACTORS</th>
+          <th>PENDING MESSAGES</th>
+          <th>CPU</th>
+          <th>MEMORY</th>
           <th>MODE</th>
           <th>HEARTBEAT</th>
         </tr>
@@ -35,8 +42,15 @@
         <tr>
           <td><b><%= worker.workerId %></b></td>
           <td><%= worker.host || '—' %></td>
+          <td><%= worker.namespace || 'local' %></td>
+          <td><%= worker.podIP || '—' %></td>
+          <td><%= worker.status || 'ACTIVE' %></td>
+          <td><%= clusterWorkers.find(pod=>pod.name===worker.workerId)?.ready ? 'READY' : (worker.mode==='kubernetes'?'NOT READY / UNKNOWN':'LOCAL') %></td>
           <td><code><%= worker.url %></code></td>
           <td><%= actors.filter(a=>a.workerId===worker.workerId).length %></td>
+          <td><%= worker.pendingMessageCount || 0 %></td>
+          <td><%= clusterWorkers.find(pod=>pod.name===worker.workerId)?.metrics?.cpuMillicores != null ? `${clusterWorkers.find(pod=>pod.name===worker.workerId).metrics.cpuMillicores}m` : '—' %></td>
+          <td><%= clusterWorkers.find(pod=>pod.name===worker.workerId)?.metrics?.memoryBytes != null ? `${Math.round(clusterWorkers.find(pod=>pod.name===worker.workerId).metrics.memoryBytes / 1048576)} MiB` : '—' %></td>
           <td><%= worker.mode || 'local' %></td>
           <td><%= new Date(worker.lastHeartbeat).toLocaleTimeString() %></td>
         </tr>

@@ -2,20 +2,23 @@
 
 ## Lifecycle stages
 
-1. **Create:** API validates the actor ID/type, selects the least-loaded live
-   worker by assigned actor count, creates a MongoDB record, and records the
-   owner/generation in Redis.
-2. **Idle record:** the new document has `status: idle`; no worker-local actor
-   object is instantiated.
-3. **Message execution:** API resolves the worker and generation; worker queues
-   and processes the message, persists a new state/version, and marks status
-   `active`.
-4. **Status update:** API/page can set status to `active` or `idle`. This is a
-   stored display/lifecycle flag; `idle` does not stop future messages.
-5. **Migration:** eligible actor is marked `migrating`; after drain/transfer
-   it is marked `idle` at the new owner/generation.
-6. **Recovery:** the next ownership resolution can reassign an actor whose
-   worker is no longer live. State is reloaded from MongoDB.
+1. **Create:** API validates the actor ID/type and creates a durable MongoDB
+   record with no owner. The first message assigns it to a live worker.
+2. **Uninitialized record:** new actors have `status: uninitialized` and no
+   owner. The dashboard shows `UNASSIGNED` until first use.
+3. **Activation and execution:** API durably queues the message and resolves a
+   live worker and generation. The worker loads MongoDB state into a per-process
+   actor instance, obtains an actor-scoped Redis execution lease, processes the
+   next actor sequence, persists state, and acknowledges the message.
+4. **Idle deactivation:** a configurable timeout (60 seconds by default)
+   deactivates cached instances under the same execution lease. State is written
+   before the instance is removed; later messages reload and reactivate it.
+5. **Migration:** eligible actors enter `migrating`; the source rejects new
+   work and drains its execution lease. Redis ownership is compare-and-set to a
+   higher generation before MongoDB records the destination.
+6. **Recovery:** workers scan durable pending messages and load assigned actor
+   state after restart. Periodic rebalancing repairs interrupted migrations and
+   dead-owner assignments.
 
 ```mermaid
 stateDiagram-v2
@@ -48,10 +51,10 @@ pruned.
 
 ```mermaid
 flowchart TD
-  A[Validate ID and type] --> B[Choose live worker]
-  B --> C[Create MongoDB actor record]
+  A[Validate ID and type] --> B[Create unassigned MongoDB record]
+  B --> E[Await message]
+  E --> C[Choose a live worker on first message]
   C --> D[Write Redis owner and generation]
-  D --> E[Await message]
   E --> F{Migration in progress?}
   F -- yes --> G[Wait briefly or return 503]
   F -- no --> H[Worker serializes and processes]

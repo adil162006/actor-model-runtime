@@ -13,21 +13,25 @@ Supported operations and payloads are actor-type specific; see
 ## Pipeline
 
 1. The API validates the request and reads the MongoDB actor record.
-2. It waits briefly if the actor is marked `migrating`; otherwise it checks for
-   an already logged message with that ID.
+2. It allocates a per-actor sequence under a Redis enqueue lock and persists a
+   `PENDING` MongoDB message before dispatch. Existing IDs reuse the stored row.
 3. `ensureActorOwner` resolves a live worker, current Redis assignment, and
    generation. A singleton actor also requires an active lease.
-4. The API sends an HTTP POST to the selected worker with message ID and
-   ownership generation. The request has a configurable timeout.
-5. The worker serializes work by actor ID within its process.
+4. The API sends an HTTP POST to the selected worker with the durable message
+   ID, sequence, and ownership generation. A dispatch failure leaves the row
+   pending for worker recovery or a caller retry.
+5. The worker serializes work by actor ID within its process, then obtains a
+   Redis `SET NX PX` execution lease so a second Pod cannot process that actor
+   concurrently while the lease is valid.
 6. The worker checks Redis ownership/generation, checks the message log and
    recent processed-message cache, checks MongoDB assignment, and (for the
    scheduler) validates the singleton lease generation.
-7. Built-in actor logic computes the next state/result.
-8. MongoDB conditionally updates state, version, status, last-active timestamp,
-   and a rolling set of the most recent 256 message IDs/results.
-9. The worker attempts a separate `Message` document insert, updates worker
-   counts best-effort, then returns the result to the API.
+7. Built-in actor logic computes the next state/result from the activated
+   in-memory actor instance.
+8. MongoDB conditionally updates actor state/version and processed-message
+   history, then marks the durable message `COMPLETED`. A failed operation is
+   recorded as `FAILED`; stale `PROCESSING` rows return to `PENDING` after the
+   processing lease expires.
 
 ## Sequence diagram
 
@@ -42,13 +46,14 @@ sequenceDiagram
   Client->>API: POST actor message (operation, payload, optional messageId)
   API->>MongoDB: Find actor and prior Message
   API->>Redis: Resolve live worker and assignment generation
-  API->>Worker: POST internal message with generation
+  API->>MongoDB: Persist PENDING message with actor sequence
+  API->>Worker: POST internal message with generation and sequence
   Worker->>Worker: Enqueue after this actor's local tail
   Worker->>Redis: Verify owner/generation
   Worker->>MongoDB: Read actor and deduplication history
   Worker->>Worker: Apply built-in operation
   Worker->>MongoDB: Conditional state/version update + processed result
-  Worker->>MongoDB: Attempt separate Message insert
+  Worker->>MongoDB: Mark durable message COMPLETED
   Worker-->>API: Actor and result
   API-->>Client: JSON result and messageId
 ```
@@ -57,20 +62,25 @@ The standalone diagram is [message_flow.mmd](diagrams/message_flow.mmd).
 
 ## Ordering, retries, and guarantees
 
-- **Ordering:** a worker queue preserves arrival order for requests queued for
-  the same actor on that worker. There is no global ordering across processes.
-- **Retry:** the API returns `503` for an unreachable worker or timeout; it
-  does not enqueue a retry. A caller may retry with the same `messageId`.
-- **Deduplication:** recent message IDs/results are held in the actor document
-  (last 256) and message IDs are unique in the Message collection. A retry can
-  return a prior result. The bounded cache and separate writes leave failure
-  windows.
-- **Commit order:** state and processed ID are saved first; the message log is
-  inserted afterward. If the latter write fails, state remains committed and a
-  warning is logged. It is not a transaction.
+- **Ordering:** messages have a sequence allocated under a distributed enqueue
+  lock. Workers refuse to process a sequence while an earlier message is pending.
+  The execution lease serializes the actor across Pods.
+- **Retry:** an unreachable worker returns `503`, while the durable message stays
+  pending. Assigned workers poll pending messages and callers may retry with the
+  same `messageId`.
+- **Deduplication:** completed message IDs are unique in MongoDB, and actor
+  documents retain the last 256 processed results as a recovery aid. Duplicate
+  retries return the prior result when the durable message is completed.
+- **Commit order:** actor state and processed ID are saved before the durable
+  message is acknowledged. A crash between those writes is repaired from the
+  actor processed-ID history. The writes are not a MongoDB transaction.
 - **Guarantee:** do not call this exactly-once. It is synchronous,
   best-effort duplicate suppression with a durable state update and bounded
   deduplication history.
+
+The Redis execution lease is renewed during long processing and before state
+persistence verifies the lock token. MongoDB version and ownership conditions
+remain the final stale-write guards; Redis and MongoDB do not share a transaction.
 
 ## Failures
 

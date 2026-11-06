@@ -8,6 +8,9 @@
     "dev": "node --watch src/server.js",
     "worker": "node src/server.js --worker",
     "seed": "node scripts/seed.js",
+    "demo:seed": "node scripts/seed-demo.js",
+    "test": "node --test",
+    "test:integration": "node --test test/*.test.js",
     "format": "prettier --write \"**/*.{js,css,yaml,yml,json,md,html}\" && node scripts/format-ejs.js"
   },
   "keywords": [],
