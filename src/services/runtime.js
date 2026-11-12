@@ -36,6 +36,9 @@ if owner.workerId == ARGV[1] and owner.token == ARGV[2] and tonumber(owner.gener
 end
 return 0`;
 const actorInstances = new Map();
+export const rebalanceMinimumWorkers = Number(
+  process.env.REBALANCE_MIN_WORKERS || 2,
+);
 
 export const initialState = (type) =>
   type === 'CounterActor'
@@ -923,6 +926,7 @@ export async function deactivateIdleActors(workerId) {
         actorId,
         workerId,
         ownerGeneration: instance.generation,
+        keepWarm: { $ne: true },
         status: { $in: ['active', 'idle'] },
         lastActiveAt: { $lte: new Date(cutoff) },
       });
@@ -1009,8 +1013,10 @@ export async function dashboardData() {
 
 async function rebalanceUnlocked() {
   const workers = await listWorkers();
-  if (workers.length < 2) {
-    const e = new Error('At least two live workers are required to rebalance');
+  if (workers.length < rebalanceMinimumWorkers) {
+    const e = new Error(
+      `At least ${rebalanceMinimumWorkers} live workers are required to rebalance`,
+    );
     e.status = 409;
     throw e;
   }
@@ -1110,19 +1116,20 @@ async function rebalanceUnlocked() {
       counts.set(actor.workerId, counts.get(actor.workerId) + 1);
   let moved = 0;
   for (const actor of actors) {
+    // Actor count is the balancing invariant. Resource pressure is only a
+    // tie-breaker: adding it to the count score can make a CPU-busy worker
+    // with zero actors look like the donor and prevent any actor from moving.
     const donor = [...counts.entries()].sort(
-      (a, b) => b[1] * 10 + pressure(b[0]) - (a[1] * 10 + pressure(a[0])),
+      (a, b) => b[1] - a[1] || pressure(b[0]) - pressure(a[0]),
     )[0];
     const receiver = [...counts.entries()].sort(
-      (a, b) => a[1] * 10 + pressure(a[0]) - (b[1] * 10 + pressure(b[0])),
+      (a, b) => a[1] - b[1] || pressure(a[0]) - pressure(b[0]),
     )[0];
     const failedWorker = !liveIds.has(actor.workerId);
     if (!donor || !receiver || (!failedWorker && donor[0] === receiver[0]))
       break;
     if (
-      !failedWorker &&
-      donor[1] - receiver[1] <= 1 &&
-      Math.abs(pressure(donor[0]) - pressure(receiver[0])) <= 25
+      !failedWorker && donor[1] - receiver[1] <= 1
     )
       break;
     if (!failedWorker && actor.workerId !== donor[0]) continue;

@@ -32,10 +32,10 @@ between live workers without changing their IDs.
 - Direct HTTP message dispatch from the API to the selected worker, with worker polling to recover pending MongoDB messages.
 - Best-effort duplicate suppression using caller-supplied message IDs and
   bounded processed-message history; this is not exactly-once delivery.
-- A Redis-locked actor-count rebalancer that runs periodically and can also be
-  triggered manually.
+- A Redis-locked automatic actor-count rebalancer that runs on worker changes
+  and every 10 seconds once two live workers are available.
 - A Redis TTL lease and fencing generation for the built-in scheduler actor.
-- Kubernetes pod discovery, pod-log retrieval, and worker Deployment scaling.
+- Kubernetes pod discovery, pod-log retrieval, and HPA-backed worker autoscaling.
 - EJS pages for actors, workers, rebalancing, singleton status, and cluster
   status.
 
@@ -199,15 +199,11 @@ kubectl -n actorlab port-forward service/actorlab-api 3000:3000
 ```
 
 Then open <http://localhost:3000>. The sample includes a single API replica,
-two worker replicas, single-replica MongoDB and Redis Deployments, and an API
-NodePort Service. The API's service account has namespaced permissions to
-inspect worker pods/logs and patch only the `actor-worker` Deployment, plus a
-cluster-scoped read-only binding to list nodes for the Cluster page. Worker scaling
-is available in the Cluster page or via:
-
-```powershell
-kubectl -n actorlab scale deployment/actor-worker --replicas=3
-```
+a worker HPA with a two-pod minimum and ten-pod maximum, single-replica
+MongoDB and Redis Deployments, and an API NodePort Service. The HPA scales from
+average CPU (60%) and memory (70%) utilization; the Cluster page shows its
+live replica range and targets. The API's service account can inspect worker
+pods/logs and the HPA, plus list nodes through a cluster-scoped read-only binding.
 
 The sample connection Secret contains unauthenticated in-cluster URLs, not
 credentials. Configure authentication, persistence, network policy, and a
@@ -223,9 +219,10 @@ cluster-appropriate image/secret workflow before production use. See
 | `/project`                  | In-app architecture walkthrough                                          |
 | `/actors` and `/actors/:id` | Create actors, inspect state, submit operations, change displayed status |
 | `/workers`                  | Redis worker registry, actor assignments, and discovered worker pods     |
-| `/rebalancing`              | Current actor distribution and manual rebalance action                   |
+| `/rebalancing`              | Live automatic balancing, worker distribution, and migration history     |
 | `/singletons`               | Built-in scheduler actor and Redis lease status/events                   |
-| `/cluster`                  | Kubernetes status, pod details/logs, and worker replica scaling          |
+| `/cluster`                  | Kubernetes status, pod details/logs, and HPA autoscaling state           |
+| `/guide`                    | Demonstration checklist and exact triggers for heartbeat, idling, balancing, and scaling |
 
 ## API and internal endpoints
 

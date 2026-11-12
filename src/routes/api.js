@@ -13,6 +13,7 @@ import {
   listWorkers,
   allRuntimeEvents,
   recordEvent,
+  rebalanceMinimumWorkers,
 } from '../services/runtime.js';
 import {
   getClusterStatus,
@@ -63,6 +64,26 @@ router.post(
     )
       return res.status(400).json({ error: 'Unsupported actor type' });
     res.status(201).json(await createActor({ actorId, actorType }));
+  }),
+);
+router.get(
+  '/rebalancing/status',
+  asyncHandler(async (_req, res) => {
+    const workers = await listWorkers();
+    const actors = await Actor.find().lean();
+    res.json({
+      automatic: true,
+      minimumWorkers: rebalanceMinimumWorkers,
+      intervalMs: Number(process.env.AUTO_REBALANCE_INTERVAL_MS || 10000),
+      workers,
+      actors,
+      events: await allRuntimeEvents(20),
+      migrations: await ActorMigration.find()
+        .sort({ startedAt: -1 })
+        .limit(30)
+        .lean(),
+      observedAt: new Date().toISOString(),
+    });
   }),
 );
 router.get(

@@ -1,42 +1,46 @@
-<section class="page-head">
+<section class="page-head" data-live-rebalancing data-refresh-ms="3000">
   <div>
     <div class="section-kicker">
-      OWNERSHIP MIGRATION <span>CONTROLLED</span>
+      OWNERSHIP MIGRATION <span>AUTOMATIC · LIVE</span>
     </div>
-    <h1>Rebalancing</h1>
+    <h1>Automatic balancing</h1>
     <p>
-      Redistribute actors by count across live workers while preserving durable
-      state. The API also checks the registry on a 30-second interval and on
-      worker registration or drain.
+      Actors are redistributed automatically after worker joins, drains, and
+      periodic health checks. Use the manual run below when you need to show a handoff immediately.
     </p>
   </div>
-  <form method="post" action="/rebalancing/trigger">
-    <button class="button primary" <%= workers.length<2?'disabled':'' %>>
-      Trigger rebalancing <span>⇄</span>
-    </button>
-  </form>
+  <div class="live-status" aria-live="polite">
+    <i class="status-dot green"></i><span>Watching live runtime</span>
+    <small data-last-updated>connecting…</small>
+  </div>
 </section>
-<div class="note-bar">
-  <span class="note-symbol">i</span>
+<section class="panel form-panel manual-action-panel">
+  <div class="panel-heading">
+    <div><h2>Manual rebalance</h2><small>Runs the safe drain, transfer, and resume workflow immediately.</small></div>
+    <form method="post" action="/rebalancing/trigger"><button class="button primary" type="submit">Run rebalance now</button></form>
+  </div>
+  <p class="subtle">Requires at least <%= minimumWorkers %> live workers. “Moved 0 actors” means placement was already balanced.</p>
+</section>
+<div class="note-bar auto-note">
+  <span class="note-symbol">A</span>
   <p>
-    Migration marks the actor unavailable, drains the old worker, waits for its
-    distributed execution lease, then compare-and-sets the Redis owner before
-    persisting the new MongoDB generation. Pending MongoDB messages remain
-    available for destination recovery.
+    <b>Two-pod threshold:</b> balancing starts only when at least
+    <%= minimumWorkers %> live worker pods are registered. The coordinator runs
+    every <%= autoRebalanceIntervalMs / 1000 %> seconds and immediately on pod join or drain.
   </p>
 </div>
 <section class="panel table-panel">
   <div class="panel-heading">
     <div>
       <h2>Current distribution</h2>
-      <small
+      <small data-distribution-summary
         ><%= workers.length %> live worker(s) · <%= actors.length %> assigned
         actor(s)</small
       >
     </div>
   </div>
   <% if(workers.length){ %>
-  <div class="distribution">
+  <div class="distribution" data-distribution>
     <% workers.forEach(worker=>{const count=actors.filter(a=>a.workerId===worker.workerId).length; %>
     <div class="dist-row">
       <div>
@@ -45,7 +49,9 @@
           ><%= worker.host || worker.url %> · target about <%= Math.ceil(actors.filter(a=>a.workerId).length / workers.length) %></small
         >
       </div>
-      <div class="dist-bar"><i style="width: <%= Math.max(4,actors.length?count/actors.length*100:0) %>%"></i></div>
+      <div class="dist-bar">
+        <i style="width: <%= Math.max(4,actors.length?count/actors.length*100:0) %>%"></i>
+      </div>
       <strong><%= count %></strong>
     </div>
     <% }) %>
@@ -64,7 +70,7 @@
     </div>
   </div>
   <% if(events.length){ %>
-  <div class="event-list">
+  <div class="event-list" data-events>
     <% events.forEach(event=>{ %>
     <div class="event-row">
       <i class="status-dot amber"></i
@@ -81,11 +87,13 @@
   <div class="panel-heading">
     <div>
       <h2>Migration history</h2>
-      <small><%= migrations.length %> recorded transfer(s)</small>
+      <small data-migration-summary
+        ><%= migrations.length %> recorded automatic transfer(s)</small
+      >
     </div>
   </div>
   <% if(migrations.length){ %>
-  <div class="table-wrap">
+  <div class="table-wrap" data-migrations>
     <table>
       <thead>
         <tr>

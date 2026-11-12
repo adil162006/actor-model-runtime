@@ -1,0 +1,37 @@
+<section class="page-head">
+  <div>
+    <div class="section-kicker">PRESENTATION CONTROL PANEL <span>MANUAL</span></div>
+    <h1>Demo guide</h1>
+    <p>Use this page as the script for a predictable, explainable runtime demonstration.</p>
+  </div>
+  <a class="button primary" href="/actors">Start with actors</a>
+</section>
+
+<section class="panel table-panel">
+  <div class="panel-heading"><div><h2>What triggers what?</h2><small>These are separate mechanisms—do not use the words interchangeably during the demo.</small></div></div>
+  <div class="table-wrap"><table><thead><tr><th>FEATURE</th><th>TRIGGER</th><th>WHAT YOU WILL SEE</th><th>MANUAL CONTROL</th></tr></thead><tbody>
+    <tr><td>Worker heartbeat</td><td>Every <%= heartbeatIntervalMs / 1000 %> seconds</td><td>Worker remains LIVE until no heartbeat for <%= workerTimeoutMs / 1000 %> seconds</td><td>Start/stop a worker or pod</td></tr>
+    <tr><td>Actor idle deactivation</td><td>No actor message for <%= idleTimeoutMs / 1000 %> seconds</td><td>Status can become idle, then uninitialized; MongoDB state remains</td><td>Open actor → Keep warm for demo</td></tr>
+    <tr><td>Automatic rebalancing</td><td>Worker joins/drains and every <%= rebalanceIntervalMs / 1000 %> seconds, with <%= minimumWorkers %>+ live workers</td><td>Owner changes and migration history records it</td><td>Rebalancing → Run rebalance now</td></tr>
+    <tr><td>Kubernetes autoscaling</td><td>Average requested CPU or memory exceeds HPA target</td><td>Worker pod replica count changes</td><td>Cluster → Request scale (controlled demonstration)</td></tr>
+  </tbody></table></div>
+</section>
+
+<div class="details-grid">
+  <section class="panel form-panel">
+    <div class="panel-heading"><div><h2>Reliable 5-minute demo</h2><small>Works without waiting for unknown automatic events.</small></div></div>
+    <ol class="guide-steps">
+      <li>Open <a href="/actors">Actors</a>, create a CounterActor, and select <b>Keep warm for demo</b>.</li>
+      <li>Send two increments. Point out the durable state, version, owner, and message history.</li>
+      <li>Open <a href="/workers">Workers</a> to show heartbeat liveness. Heartbeats keep workers live; they do not keep actors active.</li>
+      <li>With two workers live, open <a href="/rebalancing">Rebalancing</a> and select <b>Run rebalance now</b>. Show the distribution and migration history.</li>
+      <li>For Kubernetes, open <a href="/cluster">Cluster status</a>, request one more replica, wait for it to register, then run a manual rebalance again.</li>
+    </ol>
+  </section>
+  <section class="panel form-panel">
+    <div class="panel-heading"><div><h2>Good narration</h2><small>Short explanations for the examiner.</small></div></div>
+    <p class="subtle"><b>Actor:</b> a stable identity plus durable state. <b>Worker:</b> the replaceable process currently executing it.</p>
+    <p class="subtle"><b>Keep warm:</b> a demo convenience that prevents only in-memory idle removal. State is always persisted after a message.</p>
+    <p class="subtle"><b>Autoscaling:</b> Kubernetes reacts to resource metrics. <b>Rebalancing:</b> the application redistributes actor ownership. Scaling alone does not move actors.</p>
+  </section>
+</div>

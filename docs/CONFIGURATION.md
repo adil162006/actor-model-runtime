@@ -17,6 +17,8 @@ otherwise noted.
 | `RUNTIME_MODE`              | `local`                                                               | Worker                         | Informational worker metadata                  |
 | `HEARTBEAT_INTERVAL_MS`     | `4000`                                                                | Worker                         | Heartbeat and singleton lease attempt interval |
 | `WORKER_TIMEOUT_MS`         | `15000`                                                               | Runtime service                | Worker registry liveness threshold             |
+| `ACTOR_IDLE_TIMEOUT_MS`     | `60000` in code; `300000` in demo config                              | Worker                         | Inactivity before an actor becomes idle/deactivates |
+| `ACTOR_DEACTIVATION_INTERVAL_MS` | `10000`                                                         | Worker                         | How often a worker checks for idle actors      |
 | `WORKER_REQUEST_TIMEOUT_MS` | `5000`                                                                | Runtime service                | Ownership wait, API-to-worker request timeout  |
 | `SINGLETON_LEASE_MS`        | `12000`                                                               | Runtime service                | Singleton Redis lease TTL                      |
 | `K8S_NAMESPACE`             | `actorlab`                                                            | Kubernetes service             | Namespace for pod and Deployment operations    |
@@ -30,6 +32,13 @@ The sample `.env.example` sets `WORKER_ID=worker-local-1`,
 `WORKER_ADVERTISE_HOST=127.0.0.1`, and the default values above. Give each
 additional local worker a unique ID and port. Its advertised address must be
 reachable from the API.
+
+`HEARTBEAT_INTERVAL_MS` is for worker liveness only. It does not reset an
+actor's `lastActiveAt` timestamp and does not stop idle deactivation. For a
+presentation, the supplied `.env.example` and Kubernetes ConfigMap set the
+actor idle timeout to five minutes. An individual actor can also be marked
+**Keep warm for demo** from its details page; that bypasses only its idle
+deactivation sweep.
 
 ## npm scripts
 

@@ -116,6 +116,13 @@ show `CONNECTED`, two ready worker pods, and one `minikube` node.
 
 ## Complete live demo script
 
+Before presenting, open **Demo guide** in the application. It shows the live
+configured timings and separates worker heartbeat, actor idling, application
+rebalancing, and Kubernetes HPA scaling. Mark the actors you need to keep
+visible with **Keep warm for demo** on the actor details page. This is useful
+because a worker heartbeat proves a worker is alive; it does not keep an idle
+actor instance active.
+
 The following is the recommended 8-10 minute presentation sequence.
 
 1. **Introduce the problem (30 seconds).** Explain that a normal
@@ -140,14 +147,14 @@ The following is the recommended 8-10 minute presentation sequence.
    worker heartbeats, pod readiness, actor ownership, and the two actors being
    distributed across the two pods.
 7. **Show coordination and rebalancing (60 seconds).** Open **Rebalancing**
-   and trigger a rebalance. If distribution is already even, the expected
+   and use **Run rebalance now**. If distribution is already even, the expected
    result is `moved 0 actor(s)`; explain that this is a successful no-op. If
    actors are uneven, the page records a migration and the actor's durable
    state remains unchanged.
 8. **Show singleton safety (45 seconds).** Open **Singletons** and show the
    active `GlobalSchedulerActor` lease, owner, expiry, and fencing generation.
    Explain that only one worker schedules platform-wide jobs.
-9. **Show scaling (60 seconds).** On **Cluster status**, change replicas to
+9. **Show scaling (60 seconds).** On **Cluster status**, use **Request scale** to change replicas to
    `3`, apply, wait for the third pod to become ready, then return to `2`.
    Explain that Kubernetes changes worker capacity while actor IDs and MongoDB
    state remain stable.

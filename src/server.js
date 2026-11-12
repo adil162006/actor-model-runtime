@@ -3,7 +3,7 @@ import app from './app.js';
 import { connectDatabase } from './config/database.js';
 import mongoose from 'mongoose';
 import { connectRedis, redis } from './config/redis.js';
-import { rebalance } from './services/runtime.js';
+import { rebalance, rebalanceMinimumWorkers } from './services/runtime.js';
 
 if (process.argv.includes('--worker')) {
   const { startWorker } = await import('./runtime/worker.js');
@@ -39,7 +39,10 @@ if (process.argv.includes('--worker')) {
             console.error('Automatic rebalance failed:', error.message);
         });
     },
-    Number(process.env.AUTO_REBALANCE_INTERVAL_MS || 30000),
+    Number(process.env.AUTO_REBALANCE_INTERVAL_MS || 10000),
+  );
+  console.log(
+    `Automatic balancing enabled: every ${Number(process.env.AUTO_REBALANCE_INTERVAL_MS || 10000) / 1000}s with a ${rebalanceMinimumWorkers}-worker threshold`,
   );
   const shutdown = () => {
     clearInterval(retryTimer);

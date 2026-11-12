@@ -1,6 +1,8 @@
 import { getKubeClients } from '../config/kubernetes.js';
 const namespace = process.env.K8S_NAMESPACE || 'actorlab';
 const deploymentName = process.env.WORKER_DEPLOYMENT || 'actor-worker';
+const autoscalerName =
+  process.env.WORKER_AUTOSCALER || 'actor-worker-autoscaler';
 
 export async function getClusterStatus() {
   const { clients, error } = getKubeClients();
@@ -20,6 +22,8 @@ export async function getClusterStatus() {
       const resourceMetrics = await getWorkerResourceMetrics();
       let deployment = null;
       let deploymentStatus = null;
+      let autoscaler = null;
+      let autoscalerStatus = null;
       try {
         const result = await clients.apps.readNamespacedDeployment({
           name: deploymentName,
@@ -27,6 +31,15 @@ export async function getClusterStatus() {
         });
         deployment = result.spec;
         deploymentStatus = result.status;
+      } catch {}
+      try {
+        const result =
+          await clients.autoscaling.readNamespacedHorizontalPodAutoscaler({
+            name: autoscalerName,
+            namespace,
+          });
+        autoscaler = result.spec;
+        autoscalerStatus = result.status;
       } catch {}
       return {
         connected: true,
@@ -38,6 +51,8 @@ export async function getClusterStatus() {
         nodes: nodes.items,
         deployment,
         deploymentStatus,
+        autoscaler,
+        autoscalerStatus,
         resourceMetrics,
       };
     };
@@ -95,12 +110,15 @@ export async function getWorkerResourceMetrics() {
   const { clients } = getKubeClients();
   if (!clients) return { available: false, workers: {} };
   try {
-    const metrics = await clients.custom.listNamespacedCustomObject(
-      'metrics.k8s.io',
-      'v1beta1',
+    // client-node v1 uses object parameters for CustomObjectsApi methods.
+    // Positional arguments silently produce an invalid request, leaving the
+    // dashboard with blank metrics even while the HPA can read them.
+    const metrics = await clients.custom.listNamespacedCustomObject({
+      group: 'metrics.k8s.io',
+      version: 'v1beta1',
       namespace,
-      'pods',
-    );
+      plural: 'pods',
+    });
     const pods = await clients.core.listNamespacedPod({
       namespace,
       labelSelector: 'app=actor-worker',
