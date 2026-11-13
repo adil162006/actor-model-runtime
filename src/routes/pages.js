@@ -12,6 +12,7 @@ import {
   sendMessage,
   recordEvent,
   resetDemoData,
+  rebalanceMinimumWorkers,
 } from '../services/runtime.js';
 import {
   getClusterStatus,
@@ -115,6 +116,10 @@ router.get(
       .catch(() => ({ workers: [], available: false }));
     return render(res, 'rebalancing', 'Rebalancing', {
       ...registry,
+      minimumWorkers: rebalanceMinimumWorkers,
+      autoRebalanceIntervalMs: Number(
+        process.env.AUTO_REBALANCE_INTERVAL_MS || 10000,
+      ),
       actors: await Actor.find().lean(),
       events: await allRuntimeEvents(20),
       migrations: await ActorMigration.find()
@@ -148,6 +153,17 @@ router.get(
       logs: null,
       logError: null,
     });
+  }),
+);
+router.get('/guide', (_req, res) =>
+  render(res, 'guide', 'Operator guide', {
+    heartbeatIntervalMs: Number(process.env.HEARTBEAT_INTERVAL_MS || 4000),
+    workerTimeoutMs: Number(process.env.WORKER_TIMEOUT_MS || 15000),
+    idleTimeoutMs: Number(process.env.ACTOR_IDLE_TIMEOUT_MS || 60000),
+    rebalanceIntervalMs: Number(
+      process.env.AUTO_REBALANCE_INTERVAL_MS || 10000,
+    ),
+    minimumWorkers: rebalanceMinimumWorkers,
   }),
 );
 router.post(
@@ -266,6 +282,30 @@ router.post(
     );
     res.redirect(
       `/actors/${encodeURIComponent(req.params.id)}?message=Actor%20status%20updated`,
+    );
+  }),
+);
+router.post(
+  '/actors/:id/keep-warm',
+  asyncHandler(async (req, res) => {
+    const keepWarm = req.body.keepWarm === 'true';
+    const actor = await Actor.findOneAndUpdate(
+      { actorId: req.params.id },
+      { keepWarm },
+      { new: true },
+    );
+    if (!actor) return res.redirect('/actors?error=Actor%20not%20found');
+    await recordEvent(
+      'actor.keep_warm',
+      `${actor.actorId} ${keepWarm ? 'will stay warm' : 'can idle normally'}`,
+      { actorId: actor.actorId, keepWarm },
+    );
+    res.redirect(
+      `/actors/${encodeURIComponent(actor.actorId)}?message=${encodeURIComponent(
+        keepWarm
+          ? 'Keep warm enabled: idle deactivation is disabled for this actor'
+          : 'Keep warm disabled: normal idle deactivation is restored',
+      )}`,
     );
   }),
 );

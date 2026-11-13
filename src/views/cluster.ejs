@@ -1,4 +1,4 @@
-<section class="page-head">
+<section class="page-head" data-live-cluster data-refresh-ms="5000">
   <div>
     <div class="section-kicker">
       KUBERNETES ADAPTER <span>LIVE STATUS</span>
@@ -8,7 +8,11 @@
       Pod and Deployment information comes from the configured Kubernetes API.
     </p>
   </div>
-  <span class="badge <%= cluster.connected?'online':'balanced' %>"><%= cluster.connected?'CONNECTED':'LOCAL DEVELOPMENT MODE' %></span>
+  <div class="live-status" aria-live="polite">
+    <i class="status-dot <%= cluster.connected ? 'green' : 'amber' %>"></i>
+    <span><%= cluster.connected?'Watching cluster':'Cluster unavailable' %></span>
+    <small>refreshes every 5 seconds</small>
+  </div>
 </section>
 <section class="panel cluster-banner">
   <div class="cluster-symbol">☸</div>
@@ -72,25 +76,56 @@
   <section class="panel form-panel">
     <div class="panel-heading">
       <div>
-        <h2>Scale worker Deployment</h2>
-        <small>Requires a connected cluster and configured RBAC.</small>
+        <h2>Worker autoscaling</h2>
+        <small
+          >Horizontal Pod Autoscaler manages worker replicas from live resource
+          demand.</small
+        >
+      </div>
+      <span class="badge <%= cluster.autoscaler?'online':'balanced' %>"><%= cluster.autoscaler?'AUTOSCALING ACTIVE':'HPA NOT FOUND' %></span>
+    </div>
+    <% if(cluster.autoscaler){ const cpuMetric=cluster.autoscaler.metrics?.find(metric=>metric.resource?.name==='cpu'); const memoryMetric=cluster.autoscaler.metrics?.find(metric=>metric.resource?.name==='memory'); %>
+    <div class="autoscale-stats">
+      <div>
+        <small>RUNNING NOW</small><strong><%= cluster.autoscalerStatus?.currentReplicas ?? cluster.deploymentStatus?.readyReplicas ?? 0 %></strong
+        ><span>ready worker pods</span>
+      </div>
+      <div>
+        <small>SAFE RANGE</small
+        ><strong><%= cluster.autoscaler.minReplicas %>–<%= cluster.autoscaler.maxReplicas %></strong
+        ><span>pods (minimum threshold: 2)</span>
+      </div>
+      <div>
+        <small>CPU TARGET</small
+        ><strong><%= cpuMetric?.resource?.target?.averageUtilization ?? '—' %><%= cpuMetric ? '%' : '' %></strong
+        ><span>average requested CPU</span>
+      </div>
+      <div>
+        <small>MEMORY TARGET</small
+        ><strong><%= memoryMetric?.resource?.target?.averageUtilization ?? '—' %><%= memoryMetric ? '%' : '' %></strong
+        ><span>average requested memory</span>
       </div>
     </div>
-    <form class="stack-form" method="post" action="/cluster/scale">
-      <label
-        >Replicas<input
-          type="number"
-          name="replicas"
-          min="0"
-          max="50"
-          value="2"
-          required /></label
-      ><button class="button primary" <%= !cluster.connected?'disabled':'' %>>
-        Apply scale <span>↗</span>
-      </button>
-    </form>
+    <p class="subtle">
+      Kubernetes checks metrics continuously and adjusts replicas automatically.
+      Scale-down is stabilized for 60 seconds so actor ownership has time to
+      rebalance safely.
+    </p>
+    <% }else{ %>
+    <div class="empty"><%= cluster.connected ? 'Apply k8s/08-worker-autoscaler.yaml to enable automatic scaling (2–10 worker pods).' : 'Connect to Kubernetes to inspect the worker autoscaler.' %></div>
+    <% } %>
   </section>
 </div>
+<section class="panel form-panel manual-scale-panel">
+  <div class="panel-heading"><div><h2>Manual worker scale</h2><small>Changes Deployment replicas for a controlled demonstration.</small></div></div>
+  <% if(cluster.connected){ %>
+  <form class="form-row" method="post" action="/cluster/scale">
+    <label>Desired replicas<input name="replicas" type="number" min="0" max="50" required value="<%= cluster.deployment?.replicas ?? 2 %>" /></label>
+    <button class="button primary" type="submit">Request scale</button>
+  </form>
+  <p class="subtle">If the HPA is enabled, it may later adjust this value from CPU and memory metrics. Scaling adds capacity; run a rebalance after the new worker registers to move actor ownership.</p>
+  <% }else{ %><div class="empty">Connect to Kubernetes to request a manual scale.</div><% } %>
+</section>
 <% if(cluster.connected && cluster.nodes?.length){ %>
 <section class="panel table-panel">
   <div class="panel-heading"><h2>Kubernetes nodes</h2></div>

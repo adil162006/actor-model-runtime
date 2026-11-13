@@ -1,10 +1,23 @@
 .app-body {
-  font-size: 13px;
+  font-size: 16px;
 }
 .app-content {
   padding-top: 30px;
   padding-bottom: 46px;
   max-width: 1230px;
+}
+.sidebar .side-link {
+  font-size: 14px;
+}
+.sidebar .side-label,
+.sidebar .brand small,
+.runtime-state,
+.section-kicker {
+  font-size: 11px;
+}
+.topbar .crumb,
+.sidebar-bottom {
+  font-size: 13px;
 }
 .runtime-state {
   font-size: 10px;
@@ -28,8 +41,12 @@
 .page-head p {
   margin: 6px 0 0;
   color: #8a8a93;
-  font-size: 11px;
+  font-size: 14px;
 }
+.page-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.manual-action-panel, .manual-scale-panel { border-color: #29415f; background: #101722; }
+.guide-steps { margin: 0; padding-left: 20px; color: #c2c2ca; font-size: 13px; line-height: 1.85; }
+.guide-steps a { color: #84b3ff; }
 .page-head .section-kicker span {
   margin-left: 5px;
 }
@@ -45,7 +62,7 @@
 .metric small {
   display: block;
   color: #8a8a93;
-  font: 9px var(--mono);
+  font: 11px var(--mono);
   letter-spacing: 0.7px;
 }
 .metric strong {
@@ -55,7 +72,7 @@
 }
 .metric > span {
   color: #777780;
-  font-size: 9px;
+  font-size: 11px;
 }
 .dashboard-grid {
   display: grid;
@@ -79,13 +96,13 @@
   margin-bottom: 14px;
 }
 .panel-heading h2 {
-  font: 600 12px var(--display);
+  font: 600 15px var(--display);
   margin: 0;
 }
 .panel-heading small {
   display: block;
   color: #7f7f88;
-  font-size: 9px;
+  font-size: 12px;
   margin-top: 3px;
 }
 .panel-heading > a {
@@ -123,12 +140,12 @@
 }
 .dist-row > div:first-child b {
   display: block;
-  font-size: 10px;
+  font-size: 13px;
 }
 .dist-row > div:first-child small {
   display: block;
   color: #777780;
-  font-size: 8px;
+  font-size: 11px;
   margin-top: 2px;
 }
 .dist-bar {
@@ -144,7 +161,7 @@
   background: linear-gradient(90deg, #3b82f6, #62a1ff);
 }
 .dist-row > strong {
-  font: 10px var(--mono);
+  font: 13px var(--mono);
   color: #babac1;
   text-align: right;
 }
@@ -152,7 +169,7 @@
   padding: 22px 12px;
   color: #85858e;
   text-align: center;
-  font-size: 10px;
+  font-size: 13px;
 }
 .empty code {
   font: 10px var(--mono);
@@ -169,15 +186,15 @@
   align-items: center;
   gap: 9px;
   color: #aaaab1;
-  font-size: 9px;
+  font-size: 12px;
 }
 .event-kind {
-  font: 8px var(--mono);
+  font: 10px var(--mono);
   color: #8e9db5;
 }
 .event-row time {
   color: #71717a;
-  font-size: 8px;
+  font-size: 10px;
 }
 .form-row {
   display: grid;
@@ -231,7 +248,7 @@ table {
 th {
   text-align: left;
   color: #75757e;
-  font: 8px var(--mono);
+  font: 10px var(--mono);
   letter-spacing: 0.6px;
   padding: 9px;
   border-bottom: 1px solid #303036;
@@ -241,7 +258,7 @@ td {
   padding: 10px 9px;
   border-bottom: 1px solid #232327;
   color: #b5b5bc;
-  font-size: 9px;
+  font-size: 12px;
   white-space: nowrap;
 }
 td code {
@@ -303,7 +320,7 @@ td a,
 }
 .subtle {
   color: #85858e;
-  font-size: 9px;
+  font-size: 12px;
   line-height: 1.7;
   margin: 14px 0 0;
 }
@@ -352,7 +369,7 @@ td a,
   border-radius: 4px;
   padding: 9px 12px;
   margin: 0 0 12px;
-  font-size: 10px;
+  font-size: 13px;
 }
 .flash.error {
   border: 1px solid #562d2d;
@@ -383,10 +400,10 @@ td a,
   font-size: 19px;
 }
 .cluster-banner b {
-  font-size: 11px;
+  font-size: 14px;
 }
 .cluster-banner p {
-  font-size: 9px;
+  font-size: 12px;
   color: #85858e;
   margin: 3px 0 0;
 }
@@ -405,6 +422,57 @@ td a,
 }
 .events-panel {
   margin-top: 0;
+}
+.autoscale-stats {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+}
+.autoscale-stats > div {
+  border: 1px solid #2a3443;
+  background: #101723;
+  border-radius: 6px;
+  padding: 11px;
+}
+.autoscale-stats small,
+.autoscale-stats span {
+  display: block;
+  color: #8a96a9;
+  font-size: 11px;
+}
+.autoscale-stats small {
+  font: 10px var(--mono);
+  letter-spacing: 0.6px;
+}
+.autoscale-stats strong {
+  display: block;
+  color: #e5f0ff;
+  font: 700 22px var(--display);
+  margin: 3px 0;
+}
+.live-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #b7d6c0;
+  font-size: 13px;
+}
+.live-status .status-dot {
+  animation: live-pulse 1.4s ease-in-out infinite;
+}
+.live-status small {
+  color: #8a8a93;
+  font-size: 11px;
+}
+@keyframes live-pulse {
+  50% {
+    box-shadow: 0 0 0 6px #4ade8022;
+  }
+}
+@media (max-width: 500px) {
+  .autoscale-stats {
+    grid-template-columns: 1fr;
+  }
 }
 @media (max-width: 1050px) {
   .metric-grid {

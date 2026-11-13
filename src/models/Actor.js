@@ -38,6 +38,8 @@ const ActorSchema = new mongoose.Schema(
     messageSequence: { type: Number, default: 0 },
     version: { type: Number, default: 0 },
     lastActiveAt: { type: Date, default: Date.now },
+    // Operator control for demonstrations; warm actors skip idle deactivation.
+    keepWarm: { type: Boolean, default: false },
   },
   { timestamps: true },
 );
